@@ -19,8 +19,6 @@
 # The modifications are licensed under the MIT License, or the Llama 3 Community License Agreement if necessary.
 
 import json
-import os
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,11 +26,6 @@ from typing import Generator, List, Optional
 
 import torch
 import torch.nn.functional as F
-from fairscale.nn.model_parallel.initialize import (
-    get_model_parallel_rank,
-    initialize_model_parallel,
-    model_parallel_is_initialized,
-)
 from termcolor import cprint
 from typing import Literal
 
@@ -79,7 +72,6 @@ class Llama:
         tokenizer_path: str,
         max_seq_len: int,
         max_batch_size: int,
-        # model_parallel_size: Optional[int] = None,
         seed: int = 1,
         device: Literal["cpu", "mps", None] = None,
     ):
@@ -91,8 +83,6 @@ class Llama:
             tokenizer_path (str): Path to the tokenizer file.
             max_seq_len (int): Maximum sequence length for input text.
             max_batch_size (int): Maximum batch size for inference.
-            # model_parallel_size (Optional[int], optional): Number of model parallel processes.
-            #     If not provided, it's determined from the environment. Defaults to None.
             seed (int, optional): Random seed for reproducibility. Defaults to 1.
             device (Literal["cpu", "mps", None], optional): Device to use for inference. If None,
                 the device is set to "mps" if available, otherwise "cpu". Defaults to None.
@@ -103,37 +93,14 @@ class Llama:
         Raises:
             AssertionError: If there are no checkpoint files in the specified directory,
                 # or if the model parallel size does not match the number of checkpoint files.
-
-
-        # Note:
-        #     This method initializes the distributed process group, sets the device to CUDA,
-        #     and loads the pre-trained model and tokenizer.
         """
 
-        # if not torch.distributed.is_initialized():
-        #     torch.distributed.init_process_group("nccl")
-
-        # if not model_parallel_is_initialized():
-        #     if model_parallel_size is None:
-        #         model_parallel_size = int(os.environ.get("WORLD_SIZE", 1))
-        #     initialize_model_parallel(model_parallel_size)
-
-        # local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        # torch.cuda.set_device(local_rank)
-
         torch.manual_seed(seed)
-
-        # if local_rank > 0:
-        #     sys.stdout = open(os.devnull, "w")
 
         start_time = time.time()
 
         checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
         assert len(checkpoints) > 0, f"no checkpoint files found in {ckpt_dir}"
-        # assert model_parallel_size == len(
-        #     checkpoints
-        # ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {model_parallel_size}"
-        # ckpt_path = checkpoints[get_model_parallel_rank()]
         ckpt_path = checkpoints[0]
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         with open(Path(ckpt_dir) / "params.json", "r") as f:
@@ -146,10 +113,6 @@ class Llama:
         )
         tokenizer = Tokenizer(model_path=tokenizer_path)
         assert model_args.vocab_size == tokenizer.n_words
-        # if torch.cuda.is_bf16_supported():
-        #     torch.set_default_tensor_type(torch.cuda.BFloat16Tensor)
-        # else:
-        #     torch.set_default_tensor_type(torch.cuda.HalfTensor)
         if model_args.vision_chunk_size > 0:
             from .multimodal.model import CrossAttentionTransformer
 
@@ -159,6 +122,7 @@ class Llama:
             model = Transformer(model_args)
         device = device or ("mps" if torch.backends.mps.is_available() else "cpu")
         model.to(device)
+        model.eval()
         model.load_state_dict(checkpoint, strict=True)
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
 
@@ -245,22 +209,26 @@ class Llama:
                 )
 
         stop_tokens = torch.tensor(self.tokenizer.stop_tokens).to(device)
+
         for cur_pos in range(min_prompt_len, total_len):
-            if is_vision:
-                position_ids = torch.arange(
-                    prev_pos, cur_pos, dtype=torch.long, device=device
-                )
-                text_only_inference = model_input.vision is None
-                logits = self.model.forward(
-                    position_ids,
-                    tokens,
-                    cross_attention_masks,  # type: ignore
-                    full_text_row_masked_out_mask,
-                    xattn_caches,
-                    text_only_inference,
-                )
-            else:
-                logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            with torch.inference_mode():
+                if is_vision:
+                    position_ids = torch.arange(
+                        prev_pos, cur_pos, dtype=torch.long, device=device
+                    )
+                    text_only_inference = model_input.vision is None
+
+                    logits = self.model.forward(
+                        position_ids,
+                        tokens,
+                        cross_attention_masks,  # type: ignore
+                        full_text_row_masked_out_mask,  # type: ignore
+                        xattn_caches,
+                        text_only_inference,
+                    )
+                else:
+
+                    logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
 
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
