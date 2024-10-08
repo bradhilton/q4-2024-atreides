@@ -5,6 +5,7 @@ description = "Q4 2024 Experiments"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "black>=24.10.0",
     "datasets>=3.0.1",
     "fairscale>=0.4.13",
     "llama-stack>=0.0.39",
