@@ -124,6 +124,7 @@ dependencies = [
     { name = "datasets" },
     { name = "fairscale" },
     { name = "llama-stack" },
+    { name = "python-constraint" },
     { name = "tiktoken" },
     { name = "tokenizers" },
     { name = "torch" },
@@ -141,6 +142,7 @@ requires-dist = [
     { name = "datasets", specifier = ">=3.0.1" },
     { name = "fairscale", specifier = ">=0.4.13" },
     { name = "llama-stack", specifier = ">=0.0.39" },
+    { name = "python-constraint", specifier = ">=1.4.0" },
     { name = "tiktoken", specifier = ">=0.7.0" },
     { name = "tokenizers", specifier = ">=0.20.0" },
     { name = "torch", specifier = ">=2.4.1" },
@@ -1242,6 +1244,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/8e/62/8336eff65bcbc8e4c
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f7/3f/01c8b82017c199075f8f788d0d906b9ffbbc5a47dc9918a945e13d5a2bda/pygments-2.18.0-py3-none-any.whl", hash = "sha256:b8e6aca0523f3ab76fee51799c488e38782ac06eafcf95e7ba832985c8e7b13a", size = 1205513 },
 ]
+
+[[package]]
+name = "python-constraint"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/37/8b/5f1bc2734ca611943e1d6733ee244238679f6410a10cd45ede55a61a8402/python-constraint-1.4.0.tar.bz2", hash = "sha256:501d6f17afe0032dfc6ea6c0f8acc12e44f992733f00e8538961031ef27ccb8e", size = 18416 }
 
 [[package]]
 name = "python-dateutil"

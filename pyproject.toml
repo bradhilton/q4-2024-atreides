@@ -9,6 +9,7 @@ dependencies = [
     "datasets>=3.0.1",
     "fairscale>=0.4.13",
     "llama-stack>=0.0.39",
+    "python-constraint>=1.4.0",
     "tiktoken>=0.7.0",
     "tokenizers>=0.20.0",
     "torch>=2.4.1",
