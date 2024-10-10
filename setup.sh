@@ -1,4 +1,5 @@
 #!/bin/bash
+gpg --decrypt .env.gpg > .env
 (
     cursor --install-extension ms-python.python &
     cursor --install-extension ms-python.black-formatter &
