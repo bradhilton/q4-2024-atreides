@@ -19,7 +19,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from llama_models.llama3.api import ModelArgs
+from llama_models.llama3.api import ModelArgs as _ModelArgs
 
 try:
     import fairscale.nn.model_parallel.initialize as fs_init
@@ -34,6 +34,10 @@ try:
     FAIRSCALE_AVAILABLE = True
 except (ImportError, AssertionError):
     FAIRSCALE_AVAILABLE = False
+
+
+class ModelArgs(_ModelArgs):
+    use_flash_attention: bool = False
 
 
 class RMSNorm(nn.Module):
@@ -184,6 +188,8 @@ class Attention(nn.Module):
             )
         )
 
+        self.use_flash_attention = args.use_flash_attention
+
     def forward(
         self,
         x: torch.Tensor,
@@ -226,14 +232,18 @@ class Attention(nn.Module):
         values = values.transpose(
             1, 2
         )  # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        if True:
-            output = F.scaled_dot_product_attention(xq, keys, values, attn_mask=mask, is_causal=True)
+        if self.use_flash_attention:
+            output = F.scaled_dot_product_attention(xq, keys, values, attn_mask=mask)
         else:
             scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
             if mask is not None:
-                scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+                scores = (
+                    scores + mask
+                )  # (bs, n_local_heads, seqlen, cache_len + seqlen)
             scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-            output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+            output = torch.matmul(
+                scores, values
+            )  # (bs, n_local_heads, seqlen, head_dim)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)
 
