@@ -4,3 +4,4 @@
 __pycache__/
 experiments/checkpoints/
 experiments/data/
+experiments/02-llama3.py
