@@ -2,6 +2,6 @@
 .venv
 .vscode
 __pycache__/
-experiments/checkpoints/
+experiments/runs/
 experiments/data/
 experiments/02-llama3.py
