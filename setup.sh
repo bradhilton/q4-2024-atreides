@@ -1,7 +1,10 @@
 #!/bin/bash
-gpg --decrypt .env.gpg > .env
-gcloud auth login
+gpg --decrypt secrets.tar.gpg > secrets.tar
 (
+    tar -xvf secrets.tar && 
+    rm secrets.tar && 
+    gcloud auth activate-service-account --key-file .gcloud.json
+) & (
     cursor --install-extension ms-python.python &
     cursor --install-extension ms-python.black-formatter &
     cursor --install-extension ms-toolsai.jupyter &
