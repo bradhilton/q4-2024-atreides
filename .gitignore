@@ -2,7 +2,8 @@
 .venv
 .vscode
 __pycache__/
-experiments/runs/
-experiments/data/
-experiments/wandb/
+experiments/runs
+experiments/data
+experiments/.neptune
+experiments/wandb
 experiments/02-llama3.py
