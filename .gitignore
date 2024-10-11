@@ -4,4 +4,5 @@
 __pycache__/
 experiments/runs/
 experiments/data/
+experiments/wandb/
 experiments/02-llama3.py

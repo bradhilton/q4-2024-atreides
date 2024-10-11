@@ -10,6 +10,7 @@ dependencies = [
     "fairscale>=0.4.13",
     "llama-stack>=0.0.39",
     "python-constraint>=1.4.0",
+    "python-dotenv>=1.0.1",
     "tiktoken>=0.7.0",
     "tokenizers>=0.20.0",
     "torch>=2.4.1",
