@@ -1,5 +1,6 @@
 .env
 .gcloud.json
+.neptune
 .venv
 .vscode
 __pycache__/
@@ -8,3 +9,4 @@ experiments/data
 experiments/.neptune
 experiments/wandb
 experiments/02-llama3.py
+wandb
