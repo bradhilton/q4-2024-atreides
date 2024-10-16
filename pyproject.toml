@@ -10,6 +10,7 @@ dependencies = [
     "fairscale>=0.4.13",
     "llama-stack>=0.0.39",
     "neptune>=1.12.0",
+    "ortools>=9.11.4210",
     "python-constraint>=1.4.0",
     "python-dotenv>=1.0.1",
     "tiktoken>=0.7.0",
