@@ -3,7 +3,8 @@ import numpy as np
 from ortools.sat.python import cp_model
 import pandas as pd
 import random
-from typing import Optional
+import sympy as sp
+from typing import Optional, Union
 
 
 class Clue:
@@ -80,11 +81,11 @@ class Clue:
         return [time.strftime("%I:%M %p") for time in times]
 
     def __init__(self) -> None:
-        self.num_players = 4
+        self.num_players = 3
         self.elements = {
-            "suspect": Clue.suspects[:6],
-            "weapon": Clue.weapons[:6],
-            "room": Clue.rooms[:6],
+            "suspect": Clue.suspects[:3],
+            "weapon": Clue.weapons[:3],
+            "room": Clue.rooms[:3],
             # "motive": Clue.motives[:6],
             # "time": Clue.get_times("21:00", "03:00", "1h"),
         }
@@ -112,16 +113,16 @@ class Clue:
             for card in hand:
                 ground_truth[self.index[card], player] = 1
         self.print_grid(ground_truth)
-        manual_solver = ManualSolver()
         cp_solver = CpSolver(self, max_solve_time_per_turn=0.5)
+        simple_solver = SimpleSolver()
         turn = 0
         for player in cycle(range(self.num_players)):
-            manual_grid = manual_solver.grid(self, player)
-            print(f"Player {player + 1}'s Manual Solver Grid:")
-            self.print_grid(manual_grid)
+            simple_grid = simple_solver.grid(self, player)
+            print(f"Player {player + 1}'s Simple Solver Grid:")
+            self.print_grid(simple_grid)
             np.testing.assert_array_equal(
-                manual_grid[~np.isnan(manual_grid)],
-                ground_truth[~np.isnan(manual_grid)],
+                simple_grid[~np.isnan(simple_grid)],
+                ground_truth[~np.isnan(simple_grid)],
                 err_msg="Non-NaN values in grid do not match ground truth",
             )
             cp_grid = cp_solver.grid(self, player)
@@ -132,10 +133,10 @@ class Clue:
                 ground_truth[~np.isnan(cp_grid)],
                 err_msg="Non-NaN values in grid do not match ground truth",
             )
-            # assert np.array_equal(manual_grid, cp_grid, equal_nan=True), (
-            #     f"Manual and CP solvers' grids do not match for player {player + 1} "
-            #     f"on turn {turn}"
-            # )
+
+            assert np.array_equal(
+                simple_grid, cp_grid, equal_nan=True
+            ), "Simple Solver and CP-SAT Solver grids do not match"
 
             grid = cp_grid
 
@@ -180,8 +181,6 @@ class Clue:
                     for i, element in enumerate(self.elements)
                 )
                 print(f"Player {player + 1} won on turn {turn}!")
-                if print_solver_summary_statistics:
-                    manual_solver.print_summary_statistics()
                 break
 
             print(f"Player {player + 1} suggests: {suggestion}")
@@ -220,120 +219,125 @@ class Clue:
         print(df)
 
 
-class ManualSolver:
-    def __init__(self) -> None:
-        self.all_but = 0
-        self.suggestion_elimination = 0
-        self.element_deduction = 0
-        self.element_inference = 0
-
+class SimpleSolver:
     def grid(self, game: Clue, player: int) -> np.ndarray:
-        card_count = len(game.index)
-        grid = np.full((card_count, game.num_players), np.nan)
+        grid = np.full((len(game.index), game.num_players + 1), np.nan)
         last_grid = grid.copy()
+        constraints: list[
+            tuple[
+                Union[np.ndarray, tuple[np.ndarray, ...]],
+                Union[int, tuple[Optional[int], Optional[int]]],
+            ]
+        ] = []
 
+        # Each card may only be in one place
+        for i in range(len(game.index)):
+            constraints.append((grid[i], 1))
+
+        # Each player has game.hands[i] cards
+        for i, hand in enumerate(game.hands):
+            constraints.append((grid[:, i], len(hand)))
+
+        # The solution must have exactly one card from each game element
+        start = 0
+        for cards in game.elements.values():
+            end = start + len(cards)
+            constraints.append((grid[start:end, -1], 1))
+            start = end
+
+        # Fill in the grid with the known cards
         for card in game.hands[player]:
-            grid[game.index[card], player] = 1.0
-        for i, (suggestion, responses) in enumerate(game.history):
-            i %= game.num_players
-            for j, card in responses.items():
-                # if player j did not reveal a card
-                if card is None:
-                    # then all suggested cards must not be in player j's hand
-                    for suggested_card in suggestion:
-                        grid[game.index[suggested_card], j] = 0.0
-                # alternatively if player j revealed a card and we are the player who made the suggestion
-                elif player == i:
-                    # then we know that player j has the revealed card
-                    grid[game.index[card], j] = 1.0
+            grid[game.index[card], player] = 1
+
+        one_of: dict[int, list[set[int]]] = {i: [] for i in range(game.num_players)}
+
+        # Fill in the grid with the known cards from previous turns
+        for suggesting_player, (suggestion, responses) in enumerate(game.history):
+            suggesting_player %= game.num_players
+            for responding_player, card in responses.items():
+                if card is not None:
+                    if player == suggesting_player:
+                        grid[game.index[card], responding_player] = 1
+                    elif player != responding_player:
+                        indices = [game.index[c] for c in suggestion]
+                        # At least one of the suggested cards is in the responding player's hand
+                        constraints.append(
+                            (
+                                tuple(
+                                    grid[i : i + 1, responding_player] for i in indices
+                                ),
+                                (1, len(suggestion)),
+                            )
+                        )
+                        # And no more than len(game.hands[responding_player]) - 1 of the
+                        # unsuggested cards are in the responding player's hand
+                        constraints.append(
+                            (
+                                tuple(
+                                    grid[i + 1 : j, responding_player]
+                                    for i, j in zip(
+                                        [-1] + indices, indices + [len(game.index)]
+                                    )
+                                ),
+                                (0, len(game.hands[responding_player]) - 1),
+                            )
+                        )
+                        for previous_indices in one_of[responding_player]:
+                            if previous_indices.isdisjoint(indices):
+                                union = sorted(previous_indices.union(indices))
+                                constraints.append(
+                                    (
+                                        tuple(
+                                            grid[i + 1 : j, responding_player]
+                                            for i, j in zip(
+                                                [-1] + union, union + [len(game.index)]
+                                            )
+                                        ),
+                                        (
+                                            0,
+                                            len(game.hands[responding_player])
+                                            - len(union) // len(indices),
+                                        ),
+                                    )
+                                )
+                                one_of[responding_player].append(set(union))
+                else:
+                    for card in suggestion:
+                        grid[game.index[card], responding_player] = 0
 
         while not np.array_equal(grid, last_grid, equal_nan=True):
             last_grid = grid.copy()
-            for i in range(card_count):
-                # if we have deduced that someone has a card
-                if np.nansum(grid[i, :]) == 1:
-                    # then all other players must not have that card
-                    grid[i, np.isnan(grid[i, :])] = 0.0
-            for i in range(game.num_players):
-                # if we have deduced all the cards in player j's hand
-                if np.nansum(grid[:, i]) == len(game.hands[i]):
-                    # then all other cards must not be in player j's hand
-                    grid[np.isnan(grid[:, i]), i] = 0.0
-                # alternatively if we have deduced that all but len(hands[j]) cards are not in player j's hand
-                elif (grid[:, i] == 0.0).sum() == card_count - len(game.hands[i]):
-                    # then the remaining cards must be in player j's hand
-                    grid[np.isnan(grid[:, i]), i] = 1.0
-                    self.all_but += 1
-            for suggestion, responses in game.history:
-                for i, card in responses.items():
-                    if (
-                        # if player i revealed a card
-                        card is not None
-                        # and we don't know that any of the suggested cards are in player i's hand
-                        and np.nansum(grid[[game.index[c] for c in suggestion], i]) < 1
-                        # but we do know that all but one of the suggested cards are not in player i's hand
-                        and (grid[[game.index[c] for c in suggestion], i] == 0.0).sum()
-                        == len(suggestion) - 1
-                    ):
-                        # then the one card that we are unsure of must be in player i's hand
-                        grid[
-                            game.index[
-                                next(
-                                    c
-                                    for c in suggestion
-                                    if np.isnan(grid[game.index[c], i])
-                                )
-                            ],
-                            i,
-                        ] = 1.0
-                        self.suggestion_elimination += 1
-            start = 0
-            for cards in game.elements.values():
-                end = start + len(cards)
-                element_grid = grid[start:end]
-                if (
-                    # If we are unsure of any cells in the grid for a given game element
-                    np.isnan(element_grid).sum() > 0
-                    # but we know where all but one of the cards are
-                    and np.nansum(element_grid) == len(cards) - 1
-                ):
-                    # then we can fill the remaining unknown cells with 0
-                    element_grid[np.isnan(element_grid)] = 0
-                    self.element_deduction += 1
-                if (
-                    # If we know which card is part of the solution
-                    np.where(element_grid.sum(axis=0) == 0)[0].size == 1
-                    # and there are any cards with one unknown cell
-                    and np.where(np.isnan(element_grid).sum(axis=0) == 1)[0].size > 0
-                ):
-                    # then we can fill the unknown cells with 1
-                    solvable_rows = element_grid[
-                        np.where(np.isnan(element_grid).sum(axis=0) == 1)
-                    ]
-                    solvable_rows[np.isnan(solvable_rows)] = 1
-                    self.element_inference += 1
-                start += len(cards)
+            for views, bounds in constraints:
+                if not isinstance(views, tuple):
+                    views = (views,)
+                if isinstance(bounds, int):
+                    lower_bound = upper_bound = bounds
+                else:
+                    lower_bound, upper_bound = bounds
+                values = np.concatenate([view.flatten() for view in views])
+                if np.sum(np.nan_to_num(values, nan=1)) == lower_bound:
+                    for view in views:
+                        view[np.isnan(view)] = 1
+                if np.nansum(values) == upper_bound:
+                    for view in views:
+                        view[np.isnan(view)] = 0
 
-        return grid
-
-    def print_summary_statistics(self) -> None:
-        print(f"# of all but deductions: {self.all_but}")
-        print(f"# of suggestion eliminations: {self.suggestion_elimination}")
-        print(f"# of element deductions: {self.element_deduction}")
-        print(f"# of element inferences: {self.element_inference}")
+        return grid[:, :-1]
 
 
 class CpSolver:
     def __init__(self, game: Clue, max_solve_time_per_turn: float) -> None:
         self.model = cp_model.CpModel()
 
-        self.vars = [
+        self.vars = np.array(
             [
-                self.model.new_bool_var(f"Player {player + 1} has {card}")
-                for player in range(game.num_players)
+                [
+                    self.model.new_bool_var(f"Player {player + 1} has '{card}'")
+                    for player in range(game.num_players)
+                ]
+                for card in game.index
             ]
-            for card in game.index
-        ]
+        )
 
         # Enforce that each card i is assigned to at most one player
         for i in range(len(game.index)):
@@ -341,15 +345,14 @@ class CpSolver:
 
         # Enforce that each player has exactly len(hand) cards assigned to them
         for player, hand in enumerate(game.hands):
-            self.model.add(sum([row[player] for row in self.vars]) == len(hand))
+            self.model.add(sum(self.vars[:, player]) == len(hand))
 
         # Enforce that there are len(cards) - 1 assignments for each element
-        start = 0
         for cards in game.elements.values():
-            end = start + len(cards)
-            assignments = [var for row in self.vars[start:end] for var in row]
-            self.model.add(sum(assignments) == len(cards) - 1)
-            start = end
+            self.model.add(
+                sum(self.vars[[game.index[card] for card in cards]].flatten())
+                == len(cards) - 1
+            )
 
         self.solver = cp_model.CpSolver()
         self.solver.parameters.enumerate_all_solutions = True
@@ -362,28 +365,25 @@ class CpSolver:
             if card is not None:
                 # Everyone knows that player i has at least one of the suggested cards
                 self.model.add_at_least_one(
-                    [self.vars[game.index[card]][other_player] for card in suggestion]
+                    self.vars[[game.index[c] for c in suggestion], other_player]
                 )
             else:
                 # Everyone knows that player i does not have any of the suggested cards
                 self.model.add(
-                    sum(
-                        self.vars[game.index[card]][other_player] for card in suggestion
-                    )
+                    sum(self.vars[[game.index[c] for c in suggestion], other_player])
                     == 0
                 )
 
         # Add assumptions for the cards in the player's hand
         for card in game.hands[player]:
-            self.model.add_assumption(self.vars[game.index[card]][player])
+            self.model.add_assumption(self.vars[game.index[card], player])
 
         # Add assumptions for the cards that were revealed to the player in previous turns
         for i, (_, responses) in enumerate(game.history):
-            i %= game.num_players
-            if player == i:
+            if player == i % game.num_players:
                 for j, card in responses.items():
                     if card is not None:
-                        self.model.add_assumption(self.vars[game.index[card]][j])
+                        self.model.add_assumption(self.vars[game.index[card], j])
 
         callback = SolutionCallback(game, self.vars)
         status = self.solver.solve(self.model, callback)
@@ -396,12 +396,12 @@ class CpSolver:
 
 
 class SolutionCallback(cp_model.CpSolverSolutionCallback):
-    def __init__(self, game: Clue, vars: list[list[cp_model.IntVar]]) -> None:
-        cp_model.CpSolverSolutionCallback.__init__(self)
+    def __init__(self, game: Clue, vars: np.ndarray) -> None:
+        super().__init__()
         self.grid = np.zeros((len(game.index), game.num_players))
         self.vars = vars
         self.num_solutions = 0
 
-    def on_solution_callback(self):
-        self.grid += np.array([[self.value(var) for var in row] for row in self.vars])
+    def on_solution_callback(self) -> None:
+        self.grid += np.vectorize(self.value)(self.vars)
         self.num_solutions += 1
