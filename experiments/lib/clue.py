@@ -81,11 +81,11 @@ class Clue:
         return [time.strftime("%I:%M %p") for time in times]
 
     def __init__(self) -> None:
-        self.num_players = 3
+        self.num_players = 4
         self.elements = {
-            "suspect": Clue.suspects[:3],
-            "weapon": Clue.weapons[:3],
-            "room": Clue.rooms[:3],
+            "suspect": Clue.suspects[:6],
+            "weapon": Clue.weapons[:6],
+            "room": Clue.rooms[:6],
             # "motive": Clue.motives[:6],
             # "time": Clue.get_times("21:00", "03:00", "1h"),
         }
@@ -113,8 +113,8 @@ class Clue:
             for card in hand:
                 ground_truth[self.index[card], player] = 1
         self.print_grid(ground_truth)
-        cp_solver = CpSolver(self, max_solve_time_per_turn=0.5)
         simple_solver = SimpleSolver()
+        cp_solver = CpSolver(self, max_solve_time_per_turn=0.5)
         turn = 0
         for player in cycle(range(self.num_players)):
             simple_grid = simple_solver.grid(self, player)
@@ -138,7 +138,7 @@ class Clue:
                 simple_grid, cp_grid, equal_nan=True
             ), "Simple Solver and CP-SAT Solver grids do not match"
 
-            grid = cp_grid
+            grid = simple_grid
 
             accusation = len(np.where(grid.sum(axis=1) == 0)[0]) == len(self.elements)
             suggestion: list[str] = []
@@ -219,16 +219,16 @@ class Clue:
         print(df)
 
 
+Constraint = tuple[
+    Union[np.ndarray, tuple[np.ndarray, ...]],
+    Union[int, tuple[Optional[int], Optional[int]]],
+]
+
+
 class SimpleSolver:
     def grid(self, game: Clue, player: int) -> np.ndarray:
         grid = np.full((len(game.index), game.num_players + 1), np.nan)
-        last_grid = grid.copy()
-        constraints: list[
-            tuple[
-                Union[np.ndarray, tuple[np.ndarray, ...]],
-                Union[int, tuple[Optional[int], Optional[int]]],
-            ]
-        ] = []
+        constraints: list[Constraint] = []
 
         # Each card may only be in one place
         for i in range(len(game.index)):
@@ -301,10 +301,32 @@ class SimpleSolver:
                                     )
                                 )
                                 one_of[responding_player].append(set(union))
+                        one_of[responding_player].append(set(indices))
                 else:
                     for card in suggestion:
                         grid[game.index[card], responding_player] = 0
 
+        self.fill_grid(grid, constraints)
+
+        last_grid = np.full_like(grid, np.nan)
+        while not np.array_equal(grid, last_grid, equal_nan=True):
+            last_grid = grid.copy()
+            for indices in np.argwhere(np.isnan(grid)):
+                for assignment in (0, 1):
+                    original_grid = grid.copy()
+                    grid[indices[0], indices[1]] = assignment
+                    try:
+                        self.fill_grid(grid, constraints)
+                        grid[:] = original_grid[:]
+                    except ValueError:
+                        grid[:] = original_grid[:]
+                        grid[indices[0], indices[1]] = 1 - assignment
+                        self.fill_grid(grid, constraints)
+
+        return grid[:, :-1]
+
+    def fill_grid(self, grid: np.ndarray, constraints: list[Constraint]) -> None:
+        last_grid = np.full_like(grid, np.nan)
         while not np.array_equal(grid, last_grid, equal_nan=True):
             last_grid = grid.copy()
             for views, bounds in constraints:
@@ -315,14 +337,20 @@ class SimpleSolver:
                 else:
                     lower_bound, upper_bound = bounds
                 values = np.concatenate([view.flatten() for view in views])
-                if np.sum(np.nan_to_num(values, nan=1)) == lower_bound:
+                if np.sum(np.nan_to_num(values, nan=1)) < lower_bound:
+                    raise ValueError(
+                        f"Impossible to have at least {lower_bound} cards in constraint"
+                    )
+                elif np.sum(np.nan_to_num(values, nan=1)) == lower_bound:
                     for view in views:
                         view[np.isnan(view)] = 1
                 if np.nansum(values) == upper_bound:
                     for view in views:
                         view[np.isnan(view)] = 0
-
-        return grid[:, :-1]
+                elif np.nansum(values) > upper_bound:
+                    raise ValueError(
+                        f"Impossible to have at most {upper_bound} cards in constraint"
+                    )
 
 
 class CpSolver:
