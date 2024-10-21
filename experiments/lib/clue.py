@@ -81,13 +81,13 @@ class Clue:
         return [time.strftime("%I:%M %p") for time in times]
 
     def __init__(self) -> None:
-        self.num_players = 4
+        self.num_players = 6
         self.elements = {
             "suspect": Clue.suspects[:6],
             "weapon": Clue.weapons[:6],
             "room": Clue.rooms[:6],
-            # "motive": Clue.motives[:6],
-            # "time": Clue.get_times("21:00", "03:00", "1h"),
+            "motive": Clue.motives[:6],
+            "time": Clue.get_times("21:00", "03:00", "1h"),
         }
 
     def play(self, print_solver_summary_statistics: bool = False) -> None:
