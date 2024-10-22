@@ -80,17 +80,26 @@ class Clue:
         )
         return [time.strftime("%I:%M %p") for time in times]
 
-    def __init__(self) -> None:
-        self.num_players = 6
-        self.elements = {
-            "suspect": Clue.suspects[:6],
-            "weapon": Clue.weapons[:6],
-            "room": Clue.rooms[:6],
-            "motive": Clue.motives[:6],
-            "time": Clue.get_times("21:00", "03:00", "1h"),
+    def __init__(
+        self,
+        num_players: int = 3,
+        elements: Optional[dict[str, list[str]]] = None,
+    ) -> None:
+        self.num_players = num_players
+        self.elements = elements or {
+            "suspect": Clue.suspects[:3],
+            "weapon": Clue.weapons[:3],
+            "room": Clue.rooms[:3],
+            # "motive": Clue.motives[:6],
+            # "time": Clue.get_times("21:00", "03:00", "1h"),
         }
 
-    def play(self, print_solver_summary_statistics: bool = False) -> None:
+    def play(
+        self,
+        deductive_solver: Optional["DeductiveSolver"] = None,
+        check_if_deductive_solver_and_cp_solver_grids_match: bool = True,
+        suggest_own_card_probability: float = 0.4,
+    ) -> None:
         self.solution = {
             element: random.choice(values) for element, values in self.elements.items()
         }
@@ -113,16 +122,16 @@ class Clue:
             for card in hand:
                 ground_truth[self.index[card], player] = 1
         self.print_grid(ground_truth)
-        simple_solver = SimpleSolver()
+        deductive_solver = deductive_solver or DeductiveSolver()
         cp_solver = CpSolver(self, max_solve_time_per_turn=0.5)
-        turn = 0
+        self.num_turns = 1
         for player in cycle(range(self.num_players)):
-            simple_grid = simple_solver.grid(self, player)
+            deductive_grid = deductive_solver.grid(self, player)
             print(f"Player {player + 1}'s Simple Solver Grid:")
-            self.print_grid(simple_grid)
+            self.print_grid(deductive_grid)
             np.testing.assert_array_equal(
-                simple_grid[~np.isnan(simple_grid)],
-                ground_truth[~np.isnan(simple_grid)],
+                deductive_grid[~np.isnan(deductive_grid)],
+                ground_truth[~np.isnan(deductive_grid)],
                 err_msg="Non-NaN values in grid do not match ground truth",
             )
             cp_grid = cp_solver.grid(self, player)
@@ -134,11 +143,12 @@ class Clue:
                 err_msg="Non-NaN values in grid do not match ground truth",
             )
 
-            assert np.array_equal(
-                simple_grid, cp_grid, equal_nan=True
-            ), "Simple Solver and CP-SAT Solver grids do not match"
+            if check_if_deductive_solver_and_cp_solver_grids_match:
+                assert np.array_equal(
+                    deductive_grid, cp_grid, equal_nan=True
+                ), "Deductive Solver and CP-SAT Solver grids do not match"
 
-            grid = simple_grid
+            grid = deductive_grid
 
             accusation = len(np.where(grid.sum(axis=1) == 0)[0]) == len(self.elements)
             suggestion: list[str] = []
@@ -147,7 +157,7 @@ class Clue:
                 end = start + len(cards)
                 if (
                     not accusation
-                    and random.random() < 0.4
+                    and random.random() < suggest_own_card_probability
                     and np.sum(grid[start:end, player]) > 0
                 ):
                     suggestion.append(
@@ -180,7 +190,8 @@ class Clue:
                     suggestion[i] == self.solution[element]
                     for i, element in enumerate(self.elements)
                 )
-                print(f"Player {player + 1} won on turn {turn}!")
+                print(f"Player {player + 1} won on turn {self.num_turns}!")
+                self.winner = player
                 break
 
             print(f"Player {player + 1} suggests: {suggestion}")
@@ -200,7 +211,7 @@ class Clue:
                 else:
                     print(f"Player {j + 1} has no card to reveal")
             self.history.append((suggestion, responses))
-            turn += 1
+            self.num_turns += 1
 
     def print_grid(self, grid: np.ndarray) -> None:
         df = pd.DataFrame(
@@ -225,29 +236,65 @@ Constraint = tuple[
 ]
 
 
-class SimpleSolver:
+class DeductiveSolver:
+    def __init__(
+        self,
+        note_cards_in_hand: bool = True,
+        note_responses_to_suggestions: bool = True,
+        note_cards_that_players_do_not_have: bool = True,
+        check_unique_card_placement_constraints: bool = True,
+        check_player_hand_size_constraints: bool = True,
+        check_solution_has_one_and_only_one_card_per_element: bool = True,
+        check_one_of_constraints: bool = True,
+        check_inverse_one_of_constraints: bool = True,
+        merge_and_check_disjoint_inverse_one_of_constraints: bool = True,
+        exhaustively_test_possible_assignments: bool = True,
+    ) -> None:
+        self.note_cards_in_hand = note_cards_in_hand
+        self.note_responses_to_suggestions = note_responses_to_suggestions
+        self.note_cards_that_players_do_not_have = note_cards_that_players_do_not_have
+        self.check_unique_card_placement_constraints = (
+            check_unique_card_placement_constraints
+        )
+        self.check_player_hand_size_constraints = check_player_hand_size_constraints
+        self.check_solution_has_one_and_only_one_card_per_element = (
+            check_solution_has_one_and_only_one_card_per_element
+        )
+        self.check_one_of_constraints = check_one_of_constraints
+        self.check_inverse_one_of_constraints = check_inverse_one_of_constraints
+        self.merge_and_check_disjoint_inverse_one_of_constraints = (
+            merge_and_check_disjoint_inverse_one_of_constraints
+        )
+        self.exhaustively_test_possible_assignments = (
+            exhaustively_test_possible_assignments
+        )
+
     def grid(self, game: Clue, player: int) -> np.ndarray:
         grid = np.full((len(game.index), game.num_players + 1), np.nan)
         constraints: list[Constraint] = []
 
-        # Each card may only be in one place
-        for i in range(len(game.index)):
-            constraints.append((grid[i], 1))
+        if self.note_cards_in_hand:
+            # Fill in the grid with the known cards
+            for card in game.hands[player]:
+                grid[game.index[card], player] = 1
 
-        # Each player has game.hands[i] cards
-        for i, hand in enumerate(game.hands):
-            constraints.append((grid[:, i], len(hand)))
+        if self.check_unique_card_placement_constraints:
+            # Each card may only be in one place
+            for i in range(len(game.index)):
+                constraints.append((grid[i], 1))
 
-        # The solution must have exactly one card from each game element
-        start = 0
-        for cards in game.elements.values():
-            end = start + len(cards)
-            constraints.append((grid[start:end, -1], 1))
-            start = end
+        if self.check_player_hand_size_constraints:
+            # Each player has game.hands[i] cards
+            for i, hand in enumerate(game.hands):
+                constraints.append((grid[:, i], len(hand)))
 
-        # Fill in the grid with the known cards
-        for card in game.hands[player]:
-            grid[game.index[card], player] = 1
+        if self.check_solution_has_one_and_only_one_card_per_element:
+            # The solution must have exactly one card from each game element
+            start = 0
+            for cards in game.elements.values():
+                end = start + len(cards)
+                constraints.append((grid[start:end, -1], 1))
+                start = end
 
         one_of: dict[int, list[set[int]]] = {i: [] for i in range(game.num_players)}
 
@@ -257,33 +304,40 @@ class SimpleSolver:
             for responding_player, card in responses.items():
                 if card is not None:
                     if player == suggesting_player:
-                        grid[game.index[card], responding_player] = 1
+                        if self.note_responses_to_suggestions:
+                            grid[game.index[card], responding_player] = 1
                     elif player != responding_player:
                         indices = [game.index[c] for c in suggestion]
                         # At least one of the suggested cards is in the responding player's hand
-                        constraints.append(
-                            (
-                                tuple(
-                                    grid[i : i + 1, responding_player] for i in indices
-                                ),
-                                (1, len(suggestion)),
+                        if self.check_one_of_constraints:
+                            constraints.append(
+                                (
+                                    tuple(
+                                        grid[i : i + 1, responding_player]
+                                        for i in indices
+                                    ),
+                                    (1, len(suggestion)),
+                                )
                             )
-                        )
-                        # And no more than len(game.hands[responding_player]) - 1 of the
-                        # unsuggested cards are in the responding player's hand
-                        constraints.append(
-                            (
-                                tuple(
-                                    grid[i + 1 : j, responding_player]
-                                    for i, j in zip(
-                                        [-1] + indices, indices + [len(game.index)]
-                                    )
-                                ),
-                                (0, len(game.hands[responding_player]) - 1),
+                        if self.check_inverse_one_of_constraints:
+                            # And no more than len(game.hands[responding_player]) - 1 of the
+                            # unsuggested cards are in the responding player's hand
+                            constraints.append(
+                                (
+                                    tuple(
+                                        grid[i + 1 : j, responding_player]
+                                        for i, j in zip(
+                                            [-1] + indices, indices + [len(game.index)]
+                                        )
+                                    ),
+                                    (0, len(game.hands[responding_player]) - 1),
+                                )
                             )
-                        )
                         for previous_indices in one_of[responding_player]:
-                            if previous_indices.isdisjoint(indices):
+                            if (
+                                previous_indices.isdisjoint(indices)
+                                and self.merge_and_check_disjoint_inverse_one_of_constraints
+                            ):
                                 union = sorted(previous_indices.union(indices))
                                 constraints.append(
                                     (
@@ -302,26 +356,27 @@ class SimpleSolver:
                                 )
                                 one_of[responding_player].append(set(union))
                         one_of[responding_player].append(set(indices))
-                else:
+                elif self.note_cards_that_players_do_not_have:
                     for card in suggestion:
                         grid[game.index[card], responding_player] = 0
 
         self.fill_grid(grid, constraints)
 
-        last_grid = np.full_like(grid, np.nan)
-        while not np.array_equal(grid, last_grid, equal_nan=True):
-            last_grid = grid.copy()
-            for indices in np.argwhere(np.isnan(grid)):
-                for assignment in (0, 1):
-                    original_grid = grid.copy()
-                    grid[indices[0], indices[1]] = assignment
-                    try:
-                        self.fill_grid(grid, constraints)
-                        grid[:] = original_grid[:]
-                    except ValueError:
-                        grid[:] = original_grid[:]
-                        grid[indices[0], indices[1]] = 1 - assignment
-                        self.fill_grid(grid, constraints)
+        if self.exhaustively_test_possible_assignments:
+            last_grid = np.full_like(grid, np.nan)
+            while not np.array_equal(grid, last_grid, equal_nan=True):
+                last_grid = grid.copy()
+                for indices in np.argwhere(np.isnan(grid)):
+                    for assignment in (0, 1):
+                        original_grid = grid.copy()
+                        grid[indices[0], indices[1]] = assignment
+                        try:
+                            self.fill_grid(grid, constraints)
+                            grid[:] = original_grid[:]
+                        except ValueError:
+                            grid[:] = original_grid[:]
+                            grid[indices[0], indices[1]] = 1 - assignment
+                            self.fill_grid(grid, constraints)
 
         return grid[:, :-1]
 
