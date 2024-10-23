@@ -5,6 +5,7 @@ description = "Q4 2024 Experiments"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "accelerate>=1.0.1",
     "black>=24.10.0",
     "datasets>=3.0.1",
     "fairscale>=0.4.13",
@@ -18,10 +19,10 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "tiktoken>=0.7.0",
     "tokenizers>=0.20.0",
-    "torch>=2.4.1",
+    "torch>=2.4.0",
     "torchao>=0.6.1",
     "torchtune>=0.3.1",
-    "vllm>=0.1.2",
+    "vllm>=0.6.3",
     "wandb>=0.18.3",
 ]
 
