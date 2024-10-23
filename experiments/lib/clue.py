@@ -97,7 +97,6 @@ class Clue:
         self,
         deductive_solver: Optional["DeductiveSolver"] = None,
         check_if_deductive_solver_and_cp_solver_grids_match: bool = True,
-        suggest_own_card_probability: float = 0.4,
     ) -> "Clue":
         self.solution = {
             element: random.choice(values) for element, values in self.elements.items()
@@ -149,49 +148,60 @@ class Clue:
 
             grid = deductive_grid
 
-            accusation = len(np.where(grid.sum(axis=1) == 0)[0]) == len(self.elements)
-            suggestion: list[str] = []
-            start = 0
-            for cards in self.elements.values():
-                end = start + len(cards)
-                if (
-                    not accusation
-                    and random.random() < suggest_own_card_probability
-                    and np.sum(grid[start:end, player]) > 0
-                ):
-                    suggestion.append(
-                        deck[
-                            np.random.choice(
-                                np.where(grid[start:end, player] == 1)[0] + start
-                            )
-                        ]
-                    )
-                else:
-                    suggestion.append(
-                        deck[
-                            np.random.choice(
-                                np.where(
-                                    (np.sum if accusation else np.nansum)(grid, axis=1)[
-                                        start:end
-                                    ]
-                                    == 0
-                                )[0]
-                                + start
-                            )
-                        ]
-                    )
-                start += len(cards)
+            accusation = [deck[i] for i in np.where(grid.sum(axis=1) == 0)[0]]
 
-            if accusation:
-                print(f"Player {player + 1} has an accusation: {suggestion}")
+            if len(accusation) == len(self.elements):
+                print(f"Player {player + 1} has an accusation: {accusation}")
                 print(f"The actual solution is: {self.solution}")
                 assert all(
-                    suggestion[i] == self.solution[element]
+                    accusation[i] == self.solution[element]
                     for i, element in enumerate(self.elements)
                 )
                 print(f"Player {player + 1} won on turn {self.num_turns}!")
                 self.winner = player
                 break
+
+            suggestion: list[str] = []
+            start = 0
+            for cards in self.elements.values():
+                end = start + len(cards)
+                subgrid = grid[start:end]
+                found_solution = np.nansum(subgrid.sum(axis=1) == 0) > 0
+                x = (
+                    # solution card
+                    (3, subgrid.sum(axis=1) == 0),
+                    # possible solution cards
+                    (
+                        12,
+                        np.logical_and(
+                            np.nansum(subgrid, axis=1) == 0, not found_solution
+                        ),
+                    ),
+                    # other unknown cards
+                    (
+                        6,
+                        np.logical_and(np.nansum(subgrid, axis=1) == 0, found_solution),
+                    ),
+                    # player cards
+                    (6, grid[start:end, player] == 1),
+                    # other player known cards
+                    (
+                        1,
+                        np.logical_and(
+                            subgrid.sum(axis=1) == 1, grid[start:end, player] != 1
+                        ),
+                    ),
+                )
+                x = ((x[0], x[1].nonzero()[0]) for x in x)
+                x = (x for x in x if len(x[1]) > 0)
+                p, card_index_sets = zip(*x)
+                p = np.array(p) / np.sum(p)
+                card_index_set = card_index_sets[
+                    np.random.choice(len(card_index_sets), p=p)
+                ]
+                card = deck[np.random.choice(card_index_set) + start]
+                suggestion.append(card)
+                start += len(cards)
 
             print(f"Player {player + 1} suggests: {suggestion}")
 
