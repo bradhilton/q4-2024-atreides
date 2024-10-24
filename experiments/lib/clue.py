@@ -79,6 +79,8 @@ class Clue:
         )
         return [time.strftime("%I:%M %p") for time in times]
 
+    prefixes = dict(weapon="the ", room="the ")
+
     def __init__(
         self,
         num_players: int = 3,
