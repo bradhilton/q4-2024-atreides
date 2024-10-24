@@ -194,6 +194,7 @@ dependencies = [
     { name = "torchao" },
     { name = "torchtune" },
     { name = "vllm" },
+    { name = "vllm-training" },
     { name = "wandb" },
 ]
 
@@ -223,6 +224,7 @@ requires-dist = [
     { name = "torchao", specifier = ">=0.6.1" },
     { name = "torchtune", specifier = ">=0.3.1" },
     { name = "vllm", specifier = ">=0.6.3" },
+    { name = "vllm-training", git = "https://github.com/bradhilton/vllm" },
     { name = "wandb", specifier = ">=0.18.3" },
 ]
 
@@ -452,6 +454,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e9/a8/fb783cb0abe2b5fded9f55e5703015cdf1c9c85b3669087c538dd15a6a86/comm-0.2.2.tar.gz", hash = "sha256:3fd7a84065306e07bea1773df6eb8282de51ba82f77c72f9c85716ab11fe980e", size = 6210 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e6/75/49e5bfe642f71f272236b5b2d2691cf915a7283cc0ceda56357b61daa538/comm-0.2.2-py3-none-any.whl", hash = "sha256:e6fb86cb70ff661ee8c9c14e7d36d6de3b4066f1441be4063df9c5009f0a64d3", size = 7180 },
+]
+
+[[package]]
+name = "compressed-tensors"
+version = "0.7.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "torch" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7d/5c/1205220bf28cb1afe9701da720f88d6ae6e5677c12f34c9daf5c88f88635/compressed-tensors-0.7.1.tar.gz", hash = "sha256:3c7865ebfe4ea76ae94d7c674bcf93aedd2064571f682c09a377a219d5ebb3a0", size = 61952 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c7/3d/b040a9b77d6d0f1b0590cbadafbfa01a984a1d150ce7209a72ba5db854ca/compressed_tensors-0.7.1-py3-none-any.whl", hash = "sha256:22d11558a70f655ae647db9c8e9fb14a5e9d6983ca5aec3f267518625fd6dd0e", size = 99965 },
 ]
 
 [[package]]
@@ -3093,6 +3109,51 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/17/76/dbcad9e8b8cfefc446e18abd09d1ba4580e870f06b9ee839efda5b05864d/vllm-0.6.3.tar.gz", hash = "sha256:03e69029ad9caceaab68d5c3833ae6fe57c04be678ec37f29e9df6eaf178a9c5", size = 2726781 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/78/90/1e35ea1ae803fd624862ccc5024cbc12061930e1fd09d388c8806063e66f/vllm-0.6.3-cp38-abi3-manylinux1_x86_64.whl", hash = "sha256:939ae90251a5676b83d0c2afb92405e4e53bfb4b79a3920c80e5b57fbe9c5ff7", size = 193540602 },
+]
+
+[[package]]
+name = "vllm-training"
+version = "0.1.dev3130+ge8881b6.cu124"
+source = { git = "https://github.com/bradhilton/vllm#e8881b61e3efc2addecde1ac578bb8f00b2ea389" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "compressed-tensors" },
+    { name = "einops" },
+    { name = "fastapi" },
+    { name = "filelock" },
+    { name = "gguf" },
+    { name = "importlib-metadata" },
+    { name = "lm-format-enforcer" },
+    { name = "mistral-common", extra = ["opencv"] },
+    { name = "msgspec" },
+    { name = "numpy" },
+    { name = "nvidia-ml-py" },
+    { name = "openai" },
+    { name = "outlines" },
+    { name = "partial-json-parser" },
+    { name = "pillow" },
+    { name = "prometheus-client" },
+    { name = "prometheus-fastapi-instrumentator" },
+    { name = "protobuf" },
+    { name = "psutil" },
+    { name = "py-cpuinfo" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "pyzmq" },
+    { name = "ray" },
+    { name = "requests" },
+    { name = "sentencepiece" },
+    { name = "setuptools" },
+    { name = "six" },
+    { name = "tiktoken" },
+    { name = "tokenizers" },
+    { name = "torch" },
+    { name = "torchvision" },
+    { name = "tqdm" },
+    { name = "transformers" },
+    { name = "typing-extensions" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "xformers", marker = "platform_machine == 'x86_64' and platform_system == 'Linux'" },
 ]
 
 [[package]]

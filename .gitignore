@@ -4,6 +4,7 @@
 .venv
 .vscode
 __pycache__/
+experiments/models
 experiments/runs
 experiments/data
 experiments/.neptune
