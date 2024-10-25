@@ -3,7 +3,9 @@ import numpy as np
 from ortools.sat.python import cp_model
 import pandas as pd
 import random
-from typing import Optional, Union
+from typing import Iterable, Optional, Union
+
+from .data import player_names
 
 
 class Clue:
@@ -241,6 +243,56 @@ class Clue:
         )
         df.columns.name = "Player"
         print(df)
+
+    def get_prompt(self) -> str:
+        def comma_and_join(items: Iterable[str]) -> str:
+            items = list(items)
+            return f"{', '.join(items[:-1])}{"," if len(items) > 2 else ""} and {items[-1]}"
+
+        players = player_names.copy()
+        random.shuffle(players)
+
+        def turn(
+            player: int, suggestion: list[str], responses: dict[int, Optional[str]]
+        ) -> str:
+            prefixed = {
+                card: Clue.prefixes.get(element, "") + card
+                for element, card in zip(self.elements, suggestion)
+            }
+            return f"{players[player]} asked if anyone had {' or '.join(prefixed[card] for card in suggestion)}:\n{'\n'.join(f'- {players[responding_player]} showed {players[player]} {prefixed[card] if player == self.winner or responding_player == self.winner else 'a card'}' if card is not None else f'- {players[responding_player]} did not have any of the cards' for responding_player, card in responses.items())}"
+
+        return f"""
+        On a {random.choice(("cool", "warm"))} {random.choice(("spring", "autumn"))} {random.choice(("morning", "afternoon", "evening", "day"))} {comma_and_join(players[:self.num_players])} and sat down to play a {random.choice(("friendly", "competitive", "casual"))} {random.choice(("mystery", "deduction", "sleuthing"))} game.
+
+        They {random.choice(("assembled", "gathered"))} {len(self.elements)} {random.choice(("decks", "groups", "stacks"))} of cards, each for a {random.choice(("different", "separate"))} {random.choice(("category", "type"))} of {random.choice(("information", "data"))} composed of the following:
+
+        {"\n\n".join(f"{category.capitalize()}:\n{'\n'.join(f'- ' + card for card in cards)}" for category, cards in self.elements.items())}
+
+        After randomly (and blindly) choosing one card from each {random.choice(("deck", "group", "stack"))} and placing them in the {random.choice(("center", "middle"))} of the table facedown, they shuffled the remaining cards and dealt out the following to each player:
+
+        {"\n".join(f'- {players[player]}: {len(self.hands[player])} cards' + (f' ({comma_and_join(self.hands[player])})' if player == self.winner else "") for player in range(self.num_players))}
+
+        The game proceeded as follows:
+
+        1. On their turn, a player asked about a set of exactly {len(self.elements)} cards, one from each of the game's categories. (Note: Players could ask about any cards, including those in their own hand.)
+        2. The player directed this question to the other players in clockwise order, starting with the player to their left.
+        3. If a player had one or more of the asked-about cards, they had to show one of those cards (of their choice) to the asking player privately. The turn then ended, and play passed to the next player.
+        4. If a player did not have any of the asked-about cards, they said so, and the question passed to the next player in clockwise order.
+        5. This continued until either:
+            a) A player showed a card to the asking player, or
+            b) All the queried players had stated they didn't have any of the asked-about cards.
+        6. After a player's turn ended (either by being shown a card or having all queried players pass), play moved to the next player in clockwise order.
+
+        Here is how the game played out:
+
+        {"\n\n".join(turn(player % self.num_players, suggestion, responses) for player, (suggestion, responses) in enumerate(self.history))}
+
+        {random.choice(("At this point,", "Then, on their turn,"))} {players[self.winner]} was able to correctly {random.choice(("deduce", "infer"))} the {random.choice(("solution", "answer"))} and win the game.
+
+        What were the facedown cards in the {random.choice(("center", "middle"))} of the table?
+        """.strip().replace(
+            "    ", ""
+        )
 
 
 Constraint = tuple[
