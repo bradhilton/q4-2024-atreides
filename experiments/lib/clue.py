@@ -101,6 +101,7 @@ class Clue:
         self,
         deductive_solver: Optional["DeductiveSolver"] = None,
         check_if_deductive_solver_and_cp_solver_grids_match: bool = True,
+        print_playthrough: bool = True,
     ) -> "Clue":
         self.solution = {
             element: random.choice(values) for element, values in self.elements.items()
@@ -114,31 +115,35 @@ class Clue:
             set(filtered_deck[i :: self.num_players]) for i in range(self.num_players)
         ]
         self.hands.reverse()  # Reverse hands so players with fewer cards go first
-        for player, hand in enumerate(self.hands):
-            print(f"Player {player + 1}'s Hand: {hand}")
-        print(f"Solution: {self.solution}")
+        if print_playthrough:
+            for player, hand in enumerate(self.hands):
+                print(f"Player {player + 1}'s Hand: {hand}")
+            print(f"Solution: {self.solution}")
         self.history: list[tuple[list[str], dict[int, Optional[str]]]] = []
         self.index = {card: i for i, card in enumerate(deck)}
         ground_truth = np.zeros((len(deck), self.num_players))
         for player, hand in enumerate(self.hands):
             for card in hand:
                 ground_truth[self.index[card], player] = 1
-        self.print_grid(ground_truth)
+        if print_playthrough:
+            self.print_grid(ground_truth)
         deductive_solver = deductive_solver or DeductiveSolver()
         cp_solver = CpSolver(self, max_solve_time_per_turn=0.5)
         self.num_turns = 1
         for player in cycle(range(self.num_players)):
             deductive_grid = deductive_solver.grid(self, player)
-            print(f"Player {player + 1}'s Simple Solver Grid:")
-            self.print_grid(deductive_grid)
+            if print_playthrough:
+                print(f"Player {player + 1}'s Simple Solver Grid:")
+                self.print_grid(deductive_grid)
             np.testing.assert_array_equal(
                 deductive_grid[~np.isnan(deductive_grid)],
                 ground_truth[~np.isnan(deductive_grid)],
                 err_msg="Non-NaN values in grid do not match ground truth",
             )
             cp_grid = cp_solver.grid(self, player)
-            print(f"Player {player + 1}'s CP-SAT Solver Grid:")
-            self.print_grid(cp_grid)
+            if print_playthrough:
+                print(f"Player {player + 1}'s CP-SAT Solver Grid:")
+                self.print_grid(cp_grid)
             np.testing.assert_array_equal(
                 cp_grid[~np.isnan(cp_grid)],
                 ground_truth[~np.isnan(cp_grid)],
@@ -155,13 +160,15 @@ class Clue:
             accusation = [deck[i] for i in np.where(grid.sum(axis=1) == 0)[0]]
 
             if len(accusation) == len(self.elements):
-                print(f"Player {player + 1} has an accusation: {accusation}")
-                print(f"The actual solution is: {self.solution}")
+                if print_playthrough:
+                    print(f"Player {player + 1} has an accusation: {accusation}")
+                    print(f"The actual solution is: {self.solution}")
                 assert all(
                     accusation[i] == self.solution[element]
                     for i, element in enumerate(self.elements)
                 )
-                print(f"Player {player + 1} won on turn {self.num_turns}!")
+                if print_playthrough:
+                    print(f"Player {player + 1} won on turn {self.num_turns}!")
                 self.winner = player
                 break
 
@@ -207,7 +214,8 @@ class Clue:
                 suggestion.append(card)
                 start += len(cards)
 
-            print(f"Player {player + 1} suggests: {suggestion}")
+            if print_playthrough:
+                print(f"Player {player + 1} suggests: {suggestion}")
 
             responses: dict[int, Optional[str]] = {}
             for j in chain(range(player + 1, self.num_players), range(player)):
@@ -217,11 +225,14 @@ class Clue:
                 for card in suggestion_copy:
                     if card in self.hands[j]:
                         responses[j] = card
-                        print(f"Player {j + 1} reveals {card} to Player {player + 1}")
+                        if print_playthrough:
+                            print(
+                                f"Player {j + 1} reveals {card} to Player {player + 1}"
+                            )
                         break
                 if responses[j] is not None:
                     break
-                else:
+                elif print_playthrough:
                     print(f"Player {j + 1} has no card to reveal")
             self.history.append((suggestion, responses))
             self.num_turns += 1
