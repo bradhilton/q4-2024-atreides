@@ -4,10 +4,11 @@
 .venv
 .vscode
 __pycache__/
+experiments/.neptune
+experiments/data
+experiments/logs
 experiments/models
 experiments/runs
-experiments/data
-experiments/.neptune
 experiments/wandb
 experiments/02-llama3.py
 wandb
