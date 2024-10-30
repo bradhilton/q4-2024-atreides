@@ -5,17 +5,19 @@ from openai.types.chat.chat_completion_assistant_message_param import (
     ChatCompletionAssistantMessageParam,
 )
 from openai.types.chat.chat_completion_token_logprob import ChatCompletionTokenLogprob
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from typing import (
+    cast,
     Iterable,
     Literal,
     Optional,
+    Self,
     Union,
 )
 
 
 class Completion(BaseModel):
-    parent: Optional["Completion"] = None  # State
+    parent: Optional["Completion"] = cast(None, Field(None, exclude=True))  # State
     messages: list[Union[ChatCompletionMessageParam, Choice]] = []  # Action
     reward: float = 0.0  # Reward
     # Next state, action, reward triples
@@ -249,6 +251,15 @@ class Completion(BaseModel):
 
     def __hash__(self) -> int:
         return id(self)
+
+    @model_validator(mode="after")
+    def validate_children(self) -> Self:
+        for child in self.children:
+            if child.parent is None:
+                child.parent = self
+            elif child.parent is not self:
+                raise ValueError("Child completion's parent must be this completion.")
+        return self
 
 
 def message_param(

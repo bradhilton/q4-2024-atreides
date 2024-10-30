@@ -100,6 +100,8 @@ class Clue:
     def play(
         self,
         deductive_solver: Optional["DeductiveSolver"] = None,
+        cp_solver_max_solve_time_per_turn: float = 0.5,
+        check_cp_solver_grid: bool = True,
         check_if_deductive_solver_and_cp_solver_grids_match: bool = True,
         print_playthrough: bool = True,
     ) -> "Clue":
@@ -128,7 +130,9 @@ class Clue:
         if print_playthrough:
             self.print_grid(ground_truth)
         deductive_solver = deductive_solver or DeductiveSolver()
-        cp_solver = CpSolver(self, max_solve_time_per_turn=0.5)
+        cp_solver = CpSolver(
+            self, max_solve_time_per_turn=cp_solver_max_solve_time_per_turn
+        )
         self.num_turns = 1
         for player in cycle(range(self.num_players)):
             deductive_grid = deductive_solver.grid(self, player)
@@ -144,11 +148,12 @@ class Clue:
             if print_playthrough:
                 print(f"Player {player + 1}'s CP-SAT Solver Grid:")
                 self.print_grid(cp_grid)
-            np.testing.assert_array_equal(
-                cp_grid[~np.isnan(cp_grid)],
-                ground_truth[~np.isnan(cp_grid)],
-                err_msg="Non-NaN values in grid do not match ground truth",
-            )
+            if check_cp_solver_grid:
+                np.testing.assert_array_equal(
+                    cp_grid[~np.isnan(cp_grid)],
+                    ground_truth[~np.isnan(cp_grid)],
+                    err_msg="Non-NaN values in grid do not match ground truth",
+                )
 
             if check_if_deductive_solver_and_cp_solver_grids_match:
                 assert np.array_equal(

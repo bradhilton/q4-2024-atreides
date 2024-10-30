@@ -22,9 +22,11 @@ class CompletionSampler:
     def __init__(
         self,
         client: AsyncOpenAI,
+        max_parallel_requests: int = 2**31 - 1,
         **kwargs: Unpack[Kwargs],
     ) -> None:
         self.client = client
+        self.semaphore = asyncio.Semaphore(max_parallel_requests)
         self.kwargs = kwargs
         self.model = kwargs.get("model")
 
@@ -52,12 +54,13 @@ class CompletionSampler:
         )
         if not "model" in kwargs:
             kwargs["model"] = await self._get_model()
-        chat_completion = cast(
-            ChatCompletion,
-            await self.client.chat.completions.create(
-                **kwargs,  # type: ignore
-            ),
-        )
+        async with self.semaphore:
+            chat_completion = cast(
+                ChatCompletion,
+                await self.client.chat.completions.create(
+                    **kwargs,  # type: ignore
+                ),
+            )
         return [
             Completion(
                 parent=parent,
