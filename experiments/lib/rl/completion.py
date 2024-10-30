@@ -117,6 +117,12 @@ class Completion(BaseModel):
             yield child
             yield from child.descendants()
 
+    def leaves(self) -> Iterable["Completion"]:
+        if not self.children:
+            yield self
+        for child in self.children:
+            yield from child.leaves()
+
     def message_params(self) -> list[ChatCompletionMessageParam]:
         return [
             (
