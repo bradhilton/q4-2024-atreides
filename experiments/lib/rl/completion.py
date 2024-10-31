@@ -1,10 +1,25 @@
 import numpy as np
 from openai.types.chat import ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice, ChoiceLogprobs
-from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
 from openai.types.chat.chat_completion_assistant_message_param import (
     ChatCompletionAssistantMessageParam,
 )
+from openai.types.chat.chat_completion_content_part_param import (
+    ChatCompletionContentPartParam,
+)
+from openai.types.chat.chat_completion_function_message_param import (
+    ChatCompletionFunctionMessageParam,
+)
+from openai.types.chat.chat_completion_user_message_param import (
+    ChatCompletionUserMessageParam,
+)
+from openai.types.chat.chat_completion_system_message_param import (
+    ChatCompletionSystemMessageParam,
+)
+from openai.types.chat.chat_completion_tool_message_param import (
+    ChatCompletionToolMessageParam,
+)
+
 from openai.types.chat.chat_completion_token_logprob import ChatCompletionTokenLogprob
 from pydantic import (
     BaseModel,
@@ -14,21 +29,39 @@ from pydantic import (
 )
 from pydantic._internal._model_construction import ModelMetaclass
 from typing import (
-    Any,
     cast,
     Iterable,
     Literal,
     Optional,
     Self,
+    Required,
+    TypeAlias,
     Union,
 )
 
 
+class ChatCompletionUserMessageParamOverride(
+    ChatCompletionUserMessageParam, total=False
+):
+    # Override the `content` field to skip validation for the Iterable type to work around Pydantic bug.
+    content: Required[
+        Union[str, SkipValidation[Iterable[ChatCompletionContentPartParam]]]
+    ]
+    """The contents of the user message."""
+
+
+ChatCompletionMessageParam: TypeAlias = Union[
+    ChatCompletionSystemMessageParam,
+    ChatCompletionUserMessageParamOverride,
+    ChatCompletionAssistantMessageParam,
+    ChatCompletionToolMessageParam,
+    ChatCompletionFunctionMessageParam,
+]
+
+
 class Completion(BaseModel):
     parent: Optional["Completion"] = cast(None, Field(None, exclude=True))  # State
-    messages: list[Union[SkipValidation[ChatCompletionMessageParam], Choice]] = (
-        []
-    )  # Action
+    messages: list[Union[ChatCompletionMessageParam, Choice]] = []  # Action
     reward: float = 0.0  # Reward
     # Next state, action, reward triples
     children: set["Completion"] = set()
