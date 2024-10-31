@@ -69,12 +69,19 @@ class CompletionSampler:
             for choice in chat_completion.choices
         ]
 
+    _get_model_task: Optional[asyncio.Task[str]] = None
+
     async def _get_model(self) -> str:
         if self.model:
             return self.model
+        if self._get_model_task is None:
+            self._get_model_task = asyncio.create_task(self.__get_model())
+        return await self._get_model_task
+
+    async def __get_model(self) -> str:
         async for model in self.client.models.list():
-            self.model = model.id
             print(f"Using model: {model.id}")
+            self.model = model.id
             return model.id
         raise RuntimeError("No models available")
 
