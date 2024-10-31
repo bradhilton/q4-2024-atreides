@@ -1,12 +1,20 @@
 import numpy as np
-from openai.types.chat import ChatCompletionMessage, ChatCompletionMessageParam
+from openai.types.chat import ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice, ChoiceLogprobs
+from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
 from openai.types.chat.chat_completion_assistant_message_param import (
     ChatCompletionAssistantMessageParam,
 )
 from openai.types.chat.chat_completion_token_logprob import ChatCompletionTokenLogprob
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    model_validator,
+    SkipValidation,
+)
+from pydantic._internal._model_construction import ModelMetaclass
 from typing import (
+    Any,
     cast,
     Iterable,
     Literal,
@@ -18,7 +26,9 @@ from typing import (
 
 class Completion(BaseModel):
     parent: Optional["Completion"] = cast(None, Field(None, exclude=True))  # State
-    messages: list[Union[ChatCompletionMessageParam, Choice]] = []  # Action
+    messages: list[Union[SkipValidation[ChatCompletionMessageParam], Choice]] = (
+        []
+    )  # Action
     reward: float = 0.0  # Reward
     # Next state, action, reward triples
     children: set["Completion"] = set()
