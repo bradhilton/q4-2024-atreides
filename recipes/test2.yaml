@@ -1,24 +1,31 @@
-# Config for single device full finetuning in full_finetune_single_device.py
+# Config for single device LoRA finetuning in lora_finetune_single_device.py
 # using a Llama3.1 8B Instruct model
 #
 # This config assumes that you've run the following command before launching
 # this run:
 #   tune download meta-llama/Meta-Llama-3.1-8B-Instruct --output-dir /tmp/Meta-Llama-3.1-8B-Instruct --ignore-patterns "original/consolidated.00.pth"
 #
-# The default config uses an optimizer from bitsandbytes. If you do not have it installed,
-# you can install it with
-#   pip install bitsandbytes
-#
 # To launch on a single device, run the following command from root:
-#   tune run full_finetune_single_device --config llama3_1/8B_full_single_device
+#   tune run lora_finetune_single_device --config llama3_1/8B_lora_single_device
 #
 # You can add specific overrides through the command line. For example
 # to override the checkpointer directory while launching training
 # you can run:
-#   tune run full_finetune_single_device --config llama3_1/8B_full_single_device checkpointer.checkpoint_dir=<YOUR_CHECKPOINT_DIR>
+#   tune run lora_finetune_single_device --config llama3_1/8B_lora_single_device checkpointer.checkpoint_dir=<YOUR_CHECKPOINT_DIR>
 #
 # This config works only for training on single device.
 
+
+# Model Arguments
+model:
+  _component_: torchtune.models.llama3_1.lora_llama3_1_8b
+  lora_attn_modules: ['q_proj', 'v_proj']
+  apply_lora_to_mlp: False
+  apply_lora_to_output: False
+  lora_rank: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  use_dora: True
 
 # Tokenizer
 tokenizer:
@@ -26,19 +33,9 @@ tokenizer:
   path: /home/ubuntu/atreides/.venv/lib/python3.12/site-packages/llama_models/llama3/api/tokenizer.model
   max_seq_len: null
 
-# Dataset
-dataset:
-  _component_: torchtune.datasets.alpaca_dataset
-seed: null
-shuffle: True
-
-# Model Arguments
-model:
-  _component_: torchtune.models.llama3_1.llama3_1_8b
-
 checkpointer:
   _component_: torchtune.training.FullModelHFCheckpointer
-  checkpoint_dir: /home/ubuntu/.cache/huggingface/hub/models--NousResearch--Hermes-2-Theta-Llama-3-8B/snapshots/57a73110702e7b05ba3f39fef36297454c680725 
+  checkpoint_dir: /home/ubuntu/.cache/huggingface/hub/models--NousResearch--Hermes-2-Theta-Llama-3-8B/snapshots/57a73110702e7b05ba3f39fef36297454c680725
   checkpoint_files: [
     model-00001-of-00004.safetensors,
     model-00002-of-00004.safetensors,
@@ -46,39 +43,52 @@ checkpointer:
     model-00004-of-00004.safetensors
   ]
   recipe_checkpoint: null
-  output_dir: /home/ubuntu/atreides/experiments/models/test
+  output_dir: /home/ubuntu/atreides/experiments/models/test2
   model_type: LLAMA3
 resume_from_checkpoint: False
+save_adapter_weights_only: False
 
-# Fine-tuning arguments
-batch_size: 12
-epochs: 3
+# Dataset
+dataset:
+  _component_: torchtune.datasets.alpaca_dataset
+seed: null
+shuffle: True
+batch_size: 48
+
+# Optimizer and Scheduler
 optimizer:
-  _component_: bitsandbytes.optim.PagedAdamW8bit
-  lr: 2e-5
+  _component_: torch.optim.AdamW
+  fused: True
+  weight_decay: 0.01
+  lr: 3e-4
+lr_scheduler:
+  _component_: torchtune.modules.get_cosine_schedule_with_warmup
+  num_warmup_steps: 100
+
 loss:
   _component_: torchtune.modules.loss.CEWithChunkedOutputLoss
+
+# Training
+epochs: 3
 max_steps_per_epoch: null
 gradient_accumulation_steps: 1
-optimizer_in_bwd: True
 compile: True # set it to True for better memory and performance
 
-# Training environment
-device: cuda
-
-# Memory management
-enable_activation_checkpointing: False
-
-# Reduced precision
-dtype: bf16
-
 # Logging
+output_dir: /home/ubuntu/atreides/experiments/logs
 metric_logger:
   _component_: torchtune.training.metric_logging.DiskLogger
   log_dir: ${output_dir}
-output_dir: /home/ubuntu/atreides/experiments/logs
-log_every_n_steps: 16
+log_every_n_steps: 8
 log_peak_memory_stats: True
+
+# Environment
+device: cuda
+dtype: bf16
+
+# Activations Memory
+enable_activation_checkpointing: True
+enable_activation_offloading: False
 
 # Profiler (disabled)
 profiler:
@@ -93,14 +103,14 @@ profiler:
   cuda: True
 
   #trace options passed to `torch.profiler.profile`
-  profile_memory: True
+  profile_memory: False
   with_stack: False
   record_shapes: True
   with_flops: False
 
   # `torch.profiler.schedule` options:
   # wait_steps -> wait, warmup_steps -> warmup, active_steps -> active, num_cycles -> repeat
-  wait_steps: 1
-  warmup_steps: 2
-  active_steps: 1
+  wait_steps: 5
+  warmup_steps: 5
+  active_steps: 2
   num_cycles: 1
