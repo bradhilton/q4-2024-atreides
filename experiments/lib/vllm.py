@@ -12,15 +12,17 @@ from uvicorn.config import LOGGING_CONFIG as UVICORN_LOGGING_CONFIG
 os.environ["VLLM_LOGGING_CONFIG_PATH"] = __file__.replace(
     "vllm.py", "vllm-logging-config.json"
 )
+VLLM_LOGGING_CONFIG = json.load(open(os.environ["VLLM_LOGGING_CONFIG_PATH"]))
+LOG_FILENAME = VLLM_LOGGING_CONFIG["handlers"]["vllm"]["filename"]
+os.makedirs(os.path.dirname(LOG_FILENAME), exist_ok=True)
+with open(LOG_FILENAME, "w"):
+    pass
+
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.utils import FlexibleArgumentParser
 
 from .utils import read_last_n_lines
-
-
-VLLM_LOGGING_CONFIG = json.load(open(os.environ["VLLM_LOGGING_CONFIG_PATH"]))
-LOG_FILENAME = VLLM_LOGGING_CONFIG["handlers"]["vllm"]["filename"]
 
 
 async def start_vllm_server(
@@ -37,9 +39,6 @@ async def start_vllm_server(
     for key, value in kwargs.items():
         setattr(args, key, value)
     validate_parsed_serve_args(args)
-    os.makedirs(os.path.dirname(LOG_FILENAME), exist_ok=True)
-    with open(LOG_FILENAME, "w"):
-        pass
     uvicorn_logging_config = copy.deepcopy(UVICORN_LOGGING_CONFIG)
     uvicorn_logging_config["handlers"]["default"] = {
         "class": "logging.FileHandler",
