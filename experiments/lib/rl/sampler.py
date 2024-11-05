@@ -31,35 +31,47 @@ class CompletionSampler:
         self.model = kwargs.get("model")
 
     async def sample_completions(
-        self, parent: Completion, **kwargs: Unpack[Kwargs]
+        self,
+        parent: Completion,
+        continue_last_message_if_assistant: bool = True,
+        **kwargs: Unpack[Kwargs],
     ) -> list[Completion]:
-        prefix = ""
-        kwargs = dict(
-            messages=parent.all_message_params(),
-            logprobs=True,
-            **self.kwargs,  # type: ignore
-            **kwargs,  # type: ignore
-            extra_headers={
+        messages = parent.all_message_params()
+        untyped_kwargs: dict = {
+            "messages": messages,
+            "logprobs": True,
+            **self.kwargs,
+            **kwargs,
+            "extra_headers": {
                 **self.kwargs.get("extra_headers", {}),
                 **kwargs.get("extra_headers", {}),
             },
-            extra_query={
+            "extra_query": {
                 **self.kwargs.get("extra_query", {}),
                 **kwargs.get("extra_query", {}),
             },
-            extra_body={
+            "extra_body": {
                 **self.kwargs.get("extra_body", {}),
                 **kwargs.get("extra_body", {}),
             },
-        )
-        if not "model" in kwargs:
-            kwargs["model"] = await self._get_model()
+        }
+        if continue_last_message_if_assistant and messages[-1]["role"] == "assistant":
+            prefix = messages[-1].get("content") or ""
+            if not isinstance(prefix, str):
+                prefix = "".join(
+                    part["text"] if part["type"] == "text" else part["refusal"]
+                    for part in prefix
+                )
+            untyped_kwargs["extra_body"]["add_generation_prompt"] = False
+            untyped_kwargs["extra_body"]["continue_final_message"] = True
+        else:
+            prefix = ""
+        if not "model" in untyped_kwargs:
+            untyped_kwargs["model"] = await self._get_model()
         async with self.semaphore:
             chat_completion = cast(
                 ChatCompletion,
-                await self.client.chat.completions.create(
-                    **kwargs,  # type: ignore
-                ),
+                await self.client.chat.completions.create(**untyped_kwargs),
             )
         return [
             Completion(
