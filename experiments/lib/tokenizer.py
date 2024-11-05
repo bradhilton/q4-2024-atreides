@@ -11,10 +11,10 @@ class Tokenizer:
         self.llm = get_llm(model)
 
     def get_token_id(self, token: str) -> int:
-        return self.llm.get_tokenizer().convert_tokens_to_ids(token)
+        return self.llm.get_tokenizer().convert_tokens_to_ids(token)  # type: ignore
 
     def get_token(self, token_id: int) -> str:
-        return self.llm.get_tokenizer().convert_ids_to_tokens(token_id)
+        return self.llm.get_tokenizer().convert_ids_to_tokens(token_id)  # type: ignore
 
     def encode(
         self,
