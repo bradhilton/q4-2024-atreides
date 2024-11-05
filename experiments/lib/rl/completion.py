@@ -288,11 +288,12 @@ class Completion(BaseModel):
                     len(token_logprob.token)
                     for token_logprob in choice.logprobs.content[:k]
                 )
+                for child in self.children:
+                    child.parent = None
                 child = Completion(
                     parent=self,
                     messages=[
                         Choice(
-                            _request_id=choice._request_id,
                             finish_reason=choice.finish_reason,
                             index=choice.index,
                             logprobs=ChoiceLogprobs(
@@ -305,8 +306,11 @@ class Completion(BaseModel):
                     ]
                     + self.messages[j + 1 :],
                     reward=self.reward,
-                    children=self.children,
+                    weight=self.weight,
                 )
+                child.children = self.children
+                for grandchild in child.children:
+                    grandchild.parent = child
                 choice.logprobs.content = choice.logprobs.content[:k]
                 choice.message.content = choice.message.content[:l]
                 choice.message.function_call = None
