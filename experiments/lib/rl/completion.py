@@ -39,6 +39,8 @@ from typing import (
     Union,
 )
 
+from ..tokenizer import Tokenizer
+
 
 class ChatCompletionUserMessageParamOverride(
     ChatCompletionUserMessageParam, total=False
@@ -65,6 +67,8 @@ class Completion(BaseModel):
     reward: float = 0.0  # Reward
     # Next state, action, reward triples
     children: set["Completion"] = set()
+    weight: float = 1.0
+    _token_count: Optional[int] = None
 
     def commit(self, reward: Optional[float] = None) -> None:
         """
@@ -134,7 +138,7 @@ class Completion(BaseModel):
         """
         if self.parent is None:
             return 0.0
-        return self.value() - (self.parent.value() - self.parent.reward)
+        return (self.value() - (self.parent.value() - self.parent.reward)) * self.weight
 
     def adjustment(self, lambda_: float = 1.0) -> float:
         return 1 - (
@@ -154,6 +158,19 @@ class Completion(BaseModel):
 
     def adjusted_advantage(self, lambda_: float = 1.0) -> float:
         return self.advantage() * self.adjustment(lambda_)
+
+    def all_abs_advantage(self) -> float:
+        return abs(self.advantage()) + (
+            self.parent.all_abs_advantage() if self.parent else 0
+        )
+
+    def ancestors(self, including_self: bool = False) -> Iterable["Completion"]:
+        if including_self:
+            yield self
+        if not self.parent:
+            return
+        yield self.parent
+        yield from self.parent.ancestors()
 
     def descendants(self) -> Iterable["Completion"]:
         for child in self.children:
@@ -208,6 +225,17 @@ class Completion(BaseModel):
                 ),
             )
             + message_params[1:]
+        )
+
+    def token_count(self, tokenizer: Tokenizer) -> int:
+        if self._token_count:
+            return self._token_count
+        self._token_count = len(tokenizer.encode(self.message_params()))  # type: ignore
+        return self._token_count
+
+    def all_token_count(self, tokenizer: Tokenizer) -> int:
+        return self.token_count(tokenizer) + (
+            self.parent.all_token_count(tokenizer) if self.parent else 0
         )
 
     def can_split(self) -> bool:
@@ -286,6 +314,7 @@ class Completion(BaseModel):
                 self.messages = self.messages[: j + 1]
                 self.reward = 0.0
                 self.children = {child}
+                self._token_count = None
                 return True
         return False
 

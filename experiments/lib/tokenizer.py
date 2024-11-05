@@ -3,7 +3,7 @@ from vllm import LLM
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.executor.executor_base import ExecutorBase
-from typing import Union
+from typing import Optional, Union
 
 
 class Tokenizer:
@@ -15,6 +15,10 @@ class Tokenizer:
         messages: Union[
             list[ChatCompletionMessageParam], list[list[ChatCompletionMessageParam]]
         ],
+        add_generation_prompt: bool = False,
+        continue_final_message: bool = True,
+        concatenate: bool = False,
+        seqlen: Optional[int] = None,
     ) -> torch.Tensor:
         tokenizer = self.llm.get_tokenizer()
         generate = self.llm.generate
@@ -30,15 +34,28 @@ class Tokenizer:
             ]
 
         self.llm.generate = patch  # type: ignore
-        token_ids: list[list[int]] = self.llm.chat(messages)  # type: ignore
+        token_ids: list[list[int]] = self.llm.chat(
+            messages,  # type: ignore
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+        )
         self.llm.generate = generate  # type: ignore
+        pad_id = getattr(tokenizer, "pad_token_id", None) or tokenizer.eos_token_id
         if type(messages[0]) != list:
             return torch.tensor(token_ids[0])
-        max_len = max(len(seq) for seq in token_ids)
-        tokenizer = self.llm.get_tokenizer()
-        pad_id = getattr(tokenizer, "pad_token_id", None) or tokenizer.eos_token_id
-        padded_ids = [seq + [pad_id] * (max_len - len(seq)) for seq in token_ids]
-        return torch.tensor(padded_ids)
+        elif concatenate:
+            cat_token_ids = [token_id for seq in token_ids for token_id in seq]
+            if seqlen is not None:
+                cat_token_ids = cat_token_ids[:seqlen]
+                cat_token_ids += [pad_id] * (seqlen - len(cat_token_ids))
+            return torch.tensor(cat_token_ids)
+        else:
+            seqlen = (
+                seqlen if seqlen is not None else max(len(seq) for seq in token_ids)
+            )
+            trimmed_ids = [seq[:seqlen] for seq in token_ids]
+            padded_ids = [seq + [pad_id] * (seqlen - len(seq)) for seq in trimmed_ids]
+            return torch.tensor(padded_ids)
 
     def decode(self, token_ids: torch.Tensor) -> Union[str, list[str]]:
         if len(token_ids.shape) == 1:
