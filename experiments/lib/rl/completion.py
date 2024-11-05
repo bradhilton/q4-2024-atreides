@@ -1,3 +1,4 @@
+from itertools import chain
 import numpy as np
 from openai.types.chat import ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice, ChoiceLogprobs
@@ -183,10 +184,12 @@ class Completion(BaseModel):
         for child in self.children:
             yield from child.leaves()
 
-    def message_params(self) -> list[ChatCompletionMessageParam]:
+    def message_params(
+        self, replacement_token: Optional[str] = None
+    ) -> list[ChatCompletionMessageParam]:
         return [
             (
-                message_param(message_or_choice.message)
+                message_param(message_or_choice, replacement_token=replacement_token)
                 if isinstance(message_or_choice, Choice)
                 else message_or_choice
             )
@@ -194,13 +197,16 @@ class Completion(BaseModel):
         ]
 
     def all_message_params(
-        self, join_consecutive_assistant_messages: Union[bool, str] = True
+        self,
+        join_consecutive_assistant_messages: Union[bool, str] = True,
+        replacement_token: Optional[str] = None,
     ) -> list[ChatCompletionMessageParam]:
-        message_params = self.message_params()
+        message_params = self.message_params(replacement_token=replacement_token)
         if not self.parent:
             return message_params
         parent_message_params = self.parent.all_message_params(
-            join_consecutive_assistant_messages=join_consecutive_assistant_messages
+            join_consecutive_assistant_messages=join_consecutive_assistant_messages,
+            replacement_token=replacement_token,
         )
         if (
             join_consecutive_assistant_messages == False
@@ -226,6 +232,19 @@ class Completion(BaseModel):
             )
             + message_params[1:]
         )
+
+    def logprobs(self) -> Iterable[float]:
+        for choice in self.messages:
+            if isinstance(choice, Choice) and choice.logprobs:
+                for token_logprob in (
+                    choice.logprobs.content or choice.logprobs.refusal or []
+                ):
+                    yield token_logprob.logprob
+
+    def all_logprobs(self) -> Iterable[float]:
+        if self.parent:
+            yield from self.parent.all_logprobs()
+        yield from self.logprobs()
 
     def token_count(self, tokenizer: Tokenizer) -> int:
         if self._token_count:
@@ -345,8 +364,16 @@ class Completion(BaseModel):
 
 
 def message_param(
-    message: ChatCompletionMessage,
+    choice: Choice,
+    replacement_token: Optional[str] = None,
 ) -> ChatCompletionAssistantMessageParam:
+    message = choice.message
+    if replacement_token and choice.logprobs:
+        replacement = replacement_token
+        if choice.logprobs.content:
+            message.content = replacement * len(choice.logprobs.content)
+        if choice.logprobs.refusal:
+            message.refusal = replacement * len(choice.logprobs.refusal)
     message_param: ChatCompletionAssistantMessageParam = {
         "role": message.role,
     }
@@ -394,11 +421,11 @@ def joined_assistant_message_params(
     message_param: ChatCompletionAssistantMessageParam = {
         "role": "assistant",
     }
-    first_content = first.get("content")
-    second_content = second.get("content")
+    first_content = first.get("content", "")
+    second_content = second.get("content", "")
     assert isinstance(first_content, str) and isinstance(
         second_content, str
-    ), "Merging assistant message params with absent or non-string content is not supported at this time."
+    ), "Merging assistant message params with non-string content is not supported at this time."
     assert not isinstance(first.get("refusal"), str) and not isinstance(
         second.get("refusal"), str
     ), "Merging assistant message params with refusal(s) is not supported at this time."

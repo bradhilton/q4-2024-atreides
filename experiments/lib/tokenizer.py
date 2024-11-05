@@ -10,6 +10,12 @@ class Tokenizer:
     def __init__(self, model: str) -> None:
         self.llm = get_llm(model)
 
+    def get_token_id(self, token: str) -> int:
+        return self.llm.get_tokenizer().convert_tokens_to_ids(token)
+
+    def get_token(self, token_id: int) -> str:
+        return self.llm.get_tokenizer().convert_ids_to_tokens(token_id)
+
     def encode(
         self,
         messages: Union[
