@@ -33,9 +33,7 @@ class Tokenizer:
             prompts: list[dict[str, str]], *args: object, **kwargs: object
         ) -> list[list[int]]:
             return [
-                tokenizer.encode(
-                    prompt["prompt"].removesuffix("\n<|im_start|>assistant\n")
-                )
+                tokenizer.encode(prompt["prompt"])
                 for prompt in prompts
             ]
 

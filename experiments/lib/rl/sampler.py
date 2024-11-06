@@ -1,7 +1,6 @@
 import asyncio
 from openai import AsyncOpenAI
 from openai.types.chat.chat_completion import ChatCompletion, Choice
-from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
 from openai.types.chat.completion_create_params import CompletionCreateParamsBase
 from typing import (
     cast,

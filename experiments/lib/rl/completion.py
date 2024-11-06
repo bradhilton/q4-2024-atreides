@@ -261,6 +261,10 @@ class Completion(BaseModel):
         if self._token_count:
             return self._token_count
         self._token_count = len(tokenizer.encode(self.message_params()))  # type: ignore
+        if self.parent and self.parent.messages:
+            self._token_count -= 2 # Remove 2 '<|begin_of_text|>' tokens
+            if (isinstance(self.parent.messages[-1], Choice) or self.parent.messages[-1]["role"] == "assistant") and (isinstance(self.messages[0], Choice) or self.messages[0]["role"] == "assistant"):
+                self._token_count -= 3 # Remove '<|im_start|>', 'assistant', and '\n' tokens
         return self._token_count
 
     def all_token_count(self, tokenizer: Tokenizer) -> int:
