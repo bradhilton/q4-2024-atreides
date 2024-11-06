@@ -1,0 +1,94 @@
+import asyncio
+from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
+from typing import Any, Callable, Coroutine, Optional, Protocol
+
+from .completion import Completion, SplitMethod
+from .completion_sampler import CompletionSampler
+from ..tokenizer import Tokenizer
+
+
+class SampleEpisode(Protocol):
+    def __call__(self) -> "Episode" | Coroutine[Any, Any, "Episode"]: ...
+
+
+class Episode:
+    def __init__(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        on_sample: Callable[[list[Completion]], None | Coroutine[None, None, None]],
+        get_easier_episode: Optional[tuple[float, SampleEpisode]] = None,
+        get_similar_episode: Optional[SampleEpisode] = None,
+        get_harder_episode: Optional[tuple[float, Callable[[], SampleEpisode]]] = None,
+    ) -> None:
+        self.completion = Completion(messages=messages)  # type: ignore
+        self.on_sample = on_sample
+        self.min_value = (get_easier_episode or [None])[0]
+        self.max_value = (get_harder_episode or [None])[0]
+        self.get_easier_episode = (get_easier_episode or [None, None])[1]
+        self.get_similar_episode = get_similar_episode
+        self.get_harder_episode = (get_harder_episode or [None, None])[1]
+        self.weight = 1.0
+        self.task = asyncio.create_task(asyncio.sleep(0))
+
+    def num_samples(self) -> int:
+        if len(self.completion.children) == 0:
+            return 0
+        return sum(1 for _ in self.completion.leaves())
+
+    def __repr__(self) -> str:
+        parts = [f"samples={self.num_samples()}"]
+        if self.min_value is not None:
+            parts.append(f"min_value={self.min_value}")
+        if self.max_value is not None:
+            parts.append(f"max_value={self.max_value}")
+        parts.append(f"weight={self.weight}")
+        parts.append(f"task={self.task._state}")
+        return f"Episode({', '.join(parts)})"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    async def sample_completions(
+        self,
+        completion_sampler: CompletionSampler,
+        tokenizer: Tokenizer,
+        branch_factor: int,
+        split_by: SplitMethod = "count",
+    ) -> bool:
+        parent = self._get_sampleable_parent(tokenizer, split_by)
+        if parent is None:
+            return False
+        completions = await completion_sampler.sample_completions(
+            parent,
+            n=branch_factor - len(parent.children),
+        )
+        on_sample = self.on_sample(completions)
+        if isinstance(on_sample, Coroutine):
+            await on_sample
+        return True
+
+    def _get_sampleable_parent(
+        self, tokenizer: Tokenizer, split_by: SplitMethod
+    ) -> Optional[Completion]:
+        if len(self.completion.children) == 0:
+            return self.completion
+        try:
+            leaf = max(
+                (
+                    completion
+                    for completion in self.completion.leaves()
+                    if any(
+                        c.can_split() for c in completion.ancestors(including_self=True)
+                    )
+                ),
+                key=lambda c: c.all_abs_advantage() / c.all_token_count(tokenizer),
+            )
+            parent = max(
+                (c for c in leaf.ancestors(including_self=True) if c.can_split()),
+                key=lambda c: abs(c.advantage()) * c.token_count(tokenizer),
+            )
+            assert parent.split(by=split_by), "Unable to split completion"
+            return parent
+        except BaseException as e:
+            print(type(e), e)
+            self.task = asyncio.create_task(asyncio.sleep(float("inf")))

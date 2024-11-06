@@ -1,5 +1,6 @@
 import black
 from collections import deque
+from typing import Iterable
 
 
 def black_print(

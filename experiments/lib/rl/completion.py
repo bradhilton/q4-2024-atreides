@@ -61,6 +61,8 @@ ChatCompletionMessageParam: TypeAlias = Union[
     ChatCompletionFunctionMessageParam,
 ]
 
+SplitMethod = Literal["count", "prob", "logprob"]
+
 
 class Completion(BaseModel):
     parent: Optional["Completion"] = cast(None, Field(None, exclude=True))  # State
@@ -80,12 +82,6 @@ class Completion(BaseModel):
         2) That this completion is the terminal step in the trajectory.
 
         May optionally set the reward for this completion at the time of commit.
-
-        Example:
-        ```python
-        for completion in await sampler.sample_completions(...):
-            completion.commit(reward=/* calculated reward... */)
-        ```
         """
         if reward is not None:
             self.reward = reward
@@ -262,9 +258,17 @@ class Completion(BaseModel):
             return self._token_count
         self._token_count = len(tokenizer.encode(self.message_params()))  # type: ignore
         if self.parent and self.parent.messages:
-            self._token_count -= 2 # Remove 2 '<|begin_of_text|>' tokens
-            if (isinstance(self.parent.messages[-1], Choice) or self.parent.messages[-1]["role"] == "assistant") and (isinstance(self.messages[0], Choice) or self.messages[0]["role"] == "assistant"):
-                self._token_count -= 3 # Remove '<|im_start|>', 'assistant', and '\n' tokens
+            self._token_count -= 2  # Remove 2 '<|begin_of_text|>' tokens
+            if (
+                isinstance(self.parent.messages[-1], Choice)
+                or self.parent.messages[-1]["role"] == "assistant"
+            ) and (
+                isinstance(self.messages[0], Choice)
+                or self.messages[0]["role"] == "assistant"
+            ):
+                self._token_count -= (
+                    3  # Remove '<|im_start|>', 'assistant', and '\n' tokens
+                )
         return self._token_count
 
     def all_token_count(self, tokenizer: Tokenizer) -> int:
@@ -273,9 +277,17 @@ class Completion(BaseModel):
         )
 
     def can_split(self) -> bool:
-        return self._num_token_logprobs() > 1
+        num_logprobs = 0
+        for choice in self.messages:
+            if isinstance(choice, Choice) and choice.logprobs:
+                num_logprobs += len(
+                    choice.logprobs.content or choice.logprobs.refusal or []
+                )
+                if num_logprobs > 1:
+                    return True
+        return False
 
-    def split(self, by: Literal["count", "prob", "logprob"]) -> bool:
+    def split(self, by: SplitMethod) -> bool:
         """
         Creates a new child completion and splits the completable contents between the parent (this) and the child.
 

@@ -99,4 +99,6 @@ class CompletionSampler:
     def _remove_prefix(self, choice: Choice, prefix: str) -> Choice:
         if choice.message.content:
             choice.message.content = choice.message.content.removeprefix(prefix)
+        if choice.message.refusal:
+            choice.message.refusal = choice.message.refusal.removeprefix(prefix)
         return choice
