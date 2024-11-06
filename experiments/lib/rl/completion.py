@@ -246,6 +246,17 @@ class Completion(BaseModel):
             yield from self.parent.all_logprobs()
         yield from self.logprobs()
 
+    def token_advantages(self) -> Iterable[float]:
+        advantage = self.advantage()
+        num_token_logprobs = self._num_token_logprobs()
+        token_advantage = advantage / num_token_logprobs
+        return (token_advantage for _ in range(num_token_logprobs))
+
+    def all_token_advantages(self) -> Iterable[float]:
+        if self.parent:
+            yield from self.parent.all_token_advantages()
+        yield from self.token_advantages()
+
     def token_count(self, tokenizer: Tokenizer) -> int:
         if self._token_count:
             return self._token_count
@@ -258,7 +269,7 @@ class Completion(BaseModel):
         )
 
     def can_split(self) -> bool:
-        return sum(len(sequence) for sequence in self._token_logprob_sequences()) > 1
+        return self._num_token_logprobs() > 1
 
     def split(self, by: Literal["count", "prob", "logprob"]) -> bool:
         """
@@ -349,6 +360,9 @@ class Completion(BaseModel):
             and choice.logprobs
             and choice.logprobs.content
         )
+
+    def _num_token_logprobs(self) -> int:
+        return sum(len(sequence) for sequence in self._token_logprob_sequences())
 
     def __hash__(self) -> int:
         return id(self)
