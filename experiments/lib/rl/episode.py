@@ -18,7 +18,7 @@ class Episode:
         on_sample: Callable[[list[Completion]], None | Coroutine[None, None, None]],
         get_easier_episode: Optional[tuple[float, SampleEpisode]] = None,
         get_similar_episode: Optional[SampleEpisode] = None,
-        get_harder_episode: Optional[tuple[float, Callable[[], SampleEpisode]]] = None,
+        get_harder_episode: Optional[tuple[float, SampleEpisode]] = None,
     ) -> None:
         self.completion = Completion(messages=messages)  # type: ignore
         self.on_sample = on_sample
