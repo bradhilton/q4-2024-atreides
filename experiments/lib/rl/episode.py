@@ -28,12 +28,6 @@ class Episode:
         self.get_similar_episode = get_similar_episode
         self.get_harder_episode = (get_harder_episode or [None, None])[1]
         self.weight = 1.0
-        self.task = asyncio.create_task(asyncio.sleep(0))
-
-    def num_samples(self) -> int:
-        if len(self.completion.children) == 0:
-            return 0
-        return sum(1 for _ in self.completion.leaves())
 
     def __repr__(self) -> str:
         parts = [f"samples={self.num_samples()}"]
@@ -42,11 +36,18 @@ class Episode:
         if self.max_value is not None:
             parts.append(f"max_value={self.max_value}")
         parts.append(f"weight={self.weight}")
-        parts.append(f"task={self.task._state}")
         return f"Episode({', '.join(parts)})"
 
     def __str__(self) -> str:
         return self.__repr__()
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    def num_samples(self) -> int:
+        if len(self.completion.children) == 0:
+            return 0
+        return sum(1 for _ in self.completion.leaves())
 
     async def sample_completions(
         self,
@@ -55,7 +56,7 @@ class Episode:
         branch_factor: int,
         split_by: SplitMethod = "count",
     ) -> bool:
-        parent = self._get_sampleable_parent(tokenizer, split_by)
+        parent = self.get_sampleable_parent(tokenizer, split_by)
         if parent is None:
             return False
         completions = await completion_sampler.sample_completions(
@@ -67,7 +68,7 @@ class Episode:
             await on_sample
         return True
 
-    def _get_sampleable_parent(
+    def get_sampleable_parent(
         self, tokenizer: Tokenizer, split_by: SplitMethod
     ) -> Optional[Completion]:
         if len(self.completion.children) == 0:
@@ -91,4 +92,3 @@ class Episode:
             return parent
         except BaseException as e:
             print(type(e), e)
-            self.task = asyncio.create_task(asyncio.sleep(float("inf")))

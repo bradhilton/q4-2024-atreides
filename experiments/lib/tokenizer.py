@@ -9,6 +9,27 @@ from typing import Optional, Union
 class Tokenizer:
     def __init__(self, model: str) -> None:
         self.llm = get_llm(model)
+        self.prefix_token_count = (
+            len(self.encode([{"role": "user", "content": "!"}])) - 1
+        )
+        self.join_token_count = (
+            len(
+                self.encode(
+                    [
+                        {"role": "user", "content": "!"},
+                        {"role": "assistant", "content": "!"},
+                    ]
+                )
+            )
+            - 2
+            - self.prefix_token_count
+        )
+        self.token_counts: dict[str, int] = {}
+
+    def get_token_count(self, content: str) -> int:
+        if content not in self.token_counts:
+            self.token_counts[content] = len(self.llm.get_tokenizer().encode(content))
+        return self.token_counts[content]
 
     def get_token_id(self, token: str) -> int:
         return self.llm.get_tokenizer().convert_tokens_to_ids(token)  # type: ignore
@@ -32,10 +53,7 @@ class Tokenizer:
         def patch(
             prompts: list[dict[str, str]], *args: object, **kwargs: object
         ) -> list[list[int]]:
-            return [
-                tokenizer.encode(prompt["prompt"])
-                for prompt in prompts
-            ]
+            return [tokenizer.encode(prompt["prompt"]) for prompt in prompts]
 
         self.llm.generate = patch  # type: ignore
         token_ids: list[list[int]] = self.llm.chat(

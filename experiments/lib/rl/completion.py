@@ -71,7 +71,6 @@ class Completion(BaseModel):
     # Next state, action, reward triples
     children: set["Completion"] = set()
     weight: float = 1.0
-    _token_count: Optional[int] = None
 
     def commit(self, reward: Optional[float] = None) -> None:
         """
@@ -89,20 +88,6 @@ class Completion(BaseModel):
             return
         self.parent.commit()
         self.parent.children.add(self)
-
-    @property
-    def committed(self) -> bool:
-        """
-        Whether this completion has been committed to the tree.
-
-        Sampled completions are uncommitted until they and their ancestor completions are committed. (See `commit` method.)
-
-        NOTE:
-        Root nodes are always considered committed.
-        """
-        return self.parent is None or (
-            self in self.parent.children and self.parent.committed
-        )
 
     def value(self) -> float:
         """
@@ -254,22 +239,24 @@ class Completion(BaseModel):
         yield from self.token_advantages()
 
     def token_count(self, tokenizer: Tokenizer) -> int:
-        if self._token_count:
-            return self._token_count
-        self._token_count = len(tokenizer.encode(self.message_params()))  # type: ignore
-        if self.parent and self.parent.messages:
-            self._token_count -= 2  # Remove 2 '<|begin_of_text|>' tokens
-            if (
-                isinstance(self.parent.messages[-1], Choice)
-                or self.parent.messages[-1]["role"] == "assistant"
-            ) and (
-                isinstance(self.messages[0], Choice)
-                or self.messages[0]["role"] == "assistant"
-            ):
-                self._token_count -= (
-                    3  # Remove '<|im_start|>', 'assistant', and '\n' tokens
-                )
-        return self._token_count
+        if not self.messages:
+            return 0
+        token_count = sum(
+            message_token_count(message, tokenizer) for message in self.messages
+        )
+        join_parent = (
+            self.parent
+            and self.parent.messages
+            and not (
+                role(self.parent.messages[-1]) == role(self.messages[0]) == "assistant"
+            )
+        )
+        token_count += tokenizer.join_token_count * max(
+            0, len(self.messages) - (0 if join_parent else 1)
+        )
+        if not self.parent:
+            token_count += tokenizer.prefix_token_count
+        return token_count
 
     def all_token_count(self, tokenizer: Tokenizer) -> int:
         return self.token_count(tokenizer) + (
@@ -364,7 +351,6 @@ class Completion(BaseModel):
                 self.messages = self.messages[: j + 1]
                 self.reward = 0.0
                 self.children = {child}
-                self._token_count = None
                 return True
         return False
 
@@ -467,3 +453,39 @@ def joined_assistant_message_params(
     if second.get("tool_calls"):
         message_param["tool_calls"] = second.get("tool_calls", [])
     return [message_param]
+
+
+def message_token_count(
+    message: Union[ChatCompletionMessageParam, Choice], tokenizer: Tokenizer
+) -> int:
+    token_count = 0
+    if isinstance(message, Choice):
+        if message.logprobs:
+            token_count += len(
+                message.logprobs.content or message.logprobs.refusal or []
+            )
+        else:
+            token_count += tokenizer.get_token_count(
+                message.message.content or message.message.refusal or ""
+            )
+    else:
+        content = message.get("content")
+        if isinstance(content, str):
+            token_count += tokenizer.get_token_count(content)
+        elif content is not None:
+            token_count += sum(
+                tokenizer.get_token_count(
+                    part["text"]
+                    if part["type"] == "text"
+                    else part["refusal"] if part["type"] == "refusal" else ""
+                )
+                for part in content
+            )
+        refusal = message.get("refusal")
+        if isinstance(refusal, str):
+            token_count += tokenizer.get_token_count(refusal)
+    return token_count
+
+
+def role(message: Union[ChatCompletionMessageParam, Choice]) -> str:
+    return message.message.role if isinstance(message, Choice) else message["role"]
