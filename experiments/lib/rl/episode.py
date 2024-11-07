@@ -1,6 +1,6 @@
 import asyncio
 from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
-from typing import Any, Callable, Coroutine, Optional, Protocol
+from typing import Any, Callable, Coroutine, Literal, Optional, Protocol
 
 from .completion import Completion, SplitMethod
 from .completion_sampler import CompletionSampler
@@ -74,16 +74,7 @@ class Episode:
         if len(self.completion.children) == 0:
             return self.completion
         try:
-            leaf = max(
-                (
-                    completion
-                    for completion in self.completion.leaves()
-                    if any(
-                        c.can_split() for c in completion.ancestors(including_self=True)
-                    )
-                ),
-                key=lambda c: c.all_abs_advantage() / c.all_token_count(tokenizer),
-            )
+            leaf = self.best_leaf(tokenizer, where_leaf_or_ancestor_is_splittable=True)
             parent = max(
                 (c for c in leaf.ancestors(including_self=True) if c.can_split()),
                 key=lambda c: abs(c.advantage()) * c.token_count(tokenizer),
@@ -92,3 +83,19 @@ class Episode:
             return parent
         except BaseException as e:
             print(type(e), e)
+
+    def best_leaf(
+        self,
+        tokenizer: Tokenizer,
+        *,
+        where_leaf_or_ancestor_is_splittable: Optional[Literal[True]] = None,
+    ) -> Completion:
+        return max(
+            (
+                completion
+                for completion in self.completion.leaves()
+                if not where_leaf_or_ancestor_is_splittable
+                or any(c.can_split() for c in completion.ancestors(including_self=True))
+            ),
+            key=lambda c: c.all_abs_advantage() / c.all_token_count(tokenizer),
+        )
