@@ -71,7 +71,7 @@ class Episode:
         return True
 
     def get_sampleable_parent(
-        self, tokenizer: Tokenizer, split_by: SplitMethod
+        self, tokenizer: Tokenizer, split_method: SplitMethod
     ) -> Optional[Completion]:
         if len(self.completion.children) == 0:
             return self.completion
@@ -79,9 +79,9 @@ class Episode:
             leaf = self.best_leaf(tokenizer, where_leaf_or_ancestor_is_splittable=True)
             parent = max(
                 (c for c in leaf.ancestors(including_self=True) if c.can_split()),
-                key=lambda c: abs(c.advantage()) * c.token_count(tokenizer),
+                key=lambda c: abs(c.advantage()) * c.split_weight(by=split_method),
             )
-            assert parent.split(by=split_by), "Unable to split completion"
+            assert parent.split(by=split_method), "Unable to split completion"
             return parent
         except BaseException as e:
             print(type(e), e)

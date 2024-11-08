@@ -246,16 +246,19 @@ class Completion(BaseModel):
             yield from self.parent.all_logprobs()
         yield from self.logprobs()
 
-    def token_advantages(self) -> Iterable[float]:
-        advantage = self.advantage()
+    def token_advantage(self, cache: bool = False) -> float:
+        return self.advantage(cache=cache) / (self._num_token_logprobs() or 1)
+
+    def token_advantages(self, cache: bool = False) -> Iterable[float]:
+        advantage = self.advantage(cache=cache)
         num_token_logprobs = self._num_token_logprobs()
         token_advantage = advantage / num_token_logprobs
         return (token_advantage for _ in range(num_token_logprobs))
 
-    def all_token_advantages(self) -> Iterable[float]:
+    def all_token_advantages(self, cache: bool = False) -> Iterable[float]:
         if self.parent:
-            yield from self.parent.all_token_advantages()
-        yield from self.token_advantages()
+            yield from self.parent.all_token_advantages(cache=cache)
+        yield from self.token_advantages(cache=cache)
 
     def token_count(self, tokenizer: Tokenizer) -> int:
         if not self.messages:
@@ -285,13 +288,18 @@ class Completion(BaseModel):
     def can_split(self) -> bool:
         num_logprobs = 0
         for choice in self.messages:
-            if isinstance(choice, Choice) and choice.logprobs:
-                num_logprobs += len(
-                    choice.logprobs.content or choice.logprobs.refusal or []
-                )
+            if (
+                isinstance(choice, Choice)
+                and choice.logprobs
+                and choice.logprobs.content
+            ):
+                num_logprobs += len(choice.logprobs.content)
                 if num_logprobs > 1:
                     return True
         return False
+
+    def split_weight(self, by: SplitMethod) -> float:
+        return sum(self._split_weights(by))
 
     def split(self, by: SplitMethod) -> bool:
         """
@@ -305,23 +313,10 @@ class Completion(BaseModel):
         Returns:
             bool: Whether the completion was successfully split.
         """
-        token_logprobs = [
-            token_logprob
-            for sequence in self._token_logprob_sequences()
-            for token_logprob in sequence
-        ]
-        if len(token_logprobs) < 2:
+        split_weights = list(self._split_weights(by))
+        if len(split_weights) < 2:
             return False
-        cumsum = np.cumsum(
-            [
-                dict(
-                    count=lambda _: 1,
-                    prob=lambda x: 1 - np.exp(x),
-                    logprob=lambda x: -x,
-                )[by](token_logprob.logprob)
-                for token_logprob in token_logprobs
-            ]
-        )
+        cumsum = np.cumsum(split_weights)
         split = np.searchsorted(cumsum, cumsum[-1] / 2)
         i = 0
         for j, choice in enumerate(self.messages):
@@ -373,6 +368,15 @@ class Completion(BaseModel):
                 return True
         return False
 
+    def _split_weights(self, by: SplitMethod) -> Iterable[float]:
+        for sequence in self._token_logprob_sequences():
+            for token_logprob in sequence:
+                yield dict(
+                    count=lambda _: 1,
+                    prob=lambda x: 1 - np.exp(x),
+                    logprob=lambda x: -x,
+                )[by](token_logprob.logprob)
+
     def _token_logprob_sequences(self) -> Iterable[list[ChatCompletionTokenLogprob]]:
         return (
             choice.logprobs.content
@@ -387,6 +391,40 @@ class Completion(BaseModel):
 
     def __hash__(self) -> int:
         return id(self)
+
+    def html(self, scale_colors: float, cache: bool = False) -> str:
+        if not self.messages:
+            return ""
+        token_advantage = self.token_advantage(cache=cache) * scale_colors
+        color = f"rgba({255 if token_advantage < 0 else 0},0,{255 if token_advantage > 0 else 0}, {abs(token_advantage)})"
+        html = (
+            self.parent.html(scale_colors=scale_colors, cache=cache)
+            if self.parent
+            else ""
+        )
+        for i, message in enumerate(self.messages):
+            if (
+                i > 0
+                or not self.parent
+                or not self.parent.messages
+                or not (role(self.parent.messages[-1]) == role(message) == "assistant")
+            ):
+                html += f"\n\n<b>{role(message).capitalize()}</b>:\n"
+            if isinstance(message, Choice):
+                html += f"<span style='background-color: {color};'>{message.message.content}</span>"
+            else:
+                content = message.get("content") or message.get("refusal") or ""
+                if not isinstance(content, str):
+                    content = "".join(
+                        (
+                            part["text"]  # type: ignore
+                            if part["type"] == "text"
+                            else (part["refusal"] if part["type"] == "refusal" else "")  # type: ignore
+                        )
+                        for part in content
+                    )
+                html += content
+        return html.strip()
 
     @model_validator(mode="after")
     def validate_children(self) -> Self:

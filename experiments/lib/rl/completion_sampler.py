@@ -63,10 +63,41 @@ class CompletionSampler:
                 )
             untyped_kwargs["extra_body"]["add_generation_prompt"] = False
             untyped_kwargs["extra_body"]["continue_final_message"] = True
+            import copy
+            import random
+
+            if random.random() < 0.25 and parent.advantage(cache=True) < 0:
+                untyped_kwargs["messages"][-1] = copy.deepcopy(
+                    untyped_kwargs["messages"][-1]
+                )
+                untyped_kwargs["messages"][-1]["content"] += random.choice(
+                    ["...", "—"]
+                ) + random.choice(
+                    [
+                        "",
+                        "",
+                        "",
+                        "hmm",
+                        "wait a second",
+                        "sorry",
+                        "sorry, I made a mistake",
+                        "no",
+                        "no",
+                        "but",
+                        "however",
+                        "alternatively",
+                        "actually",
+                        "technically",
+                        "what I mean to say is",
+                        "hold on",
+                        "let's take a step back",
+                    ]
+                )
         else:
             prefix = ""
         if not "model" in untyped_kwargs:
             untyped_kwargs["model"] = await self._get_model()
+
         async with self.semaphore:
             chat_completion = cast(
                 ChatCompletion,

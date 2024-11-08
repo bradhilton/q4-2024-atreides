@@ -154,3 +154,7 @@ class EpisodeBuffer:
     #         ),
     #         key=lambda trajectory: trajectory.score(),
     #     )
+
+    def __del__(self) -> None:
+        if self.buffer_task:
+            self.buffer_task.cancel()
