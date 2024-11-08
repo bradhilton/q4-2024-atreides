@@ -4,7 +4,8 @@ from typing import Any, Callable, Coroutine, Literal, Optional, Protocol
 
 from .completion import Completion, SplitMethod
 from .completion_sampler import CompletionSampler
-from .trajectory import Trajectory
+
+# from .trajectory import Trajectory
 from ..tokenizer import Tokenizer
 
 
@@ -102,15 +103,15 @@ class Episode:
             key=lambda c: c.all_abs_advantage_per_token(tokenizer, cache=cache),
         )
 
-    def best_trajectory(
-        self, tokenizer: Tokenizer, *, episode_decay: float, completion_decay: float
-    ) -> Trajectory:
-        terminus = self.best_leaf(tokenizer)
-        return Trajectory(
-            episode=self,
-            terminus=terminus,
-            abs_advantage=terminus.all_abs_advantage(cache=True),
-            token_count=terminus.all_token_count(tokenizer),
-            episode_decay=episode_decay,
-            completion_decay=completion_decay,
-        )
+    # def best_trajectory(
+    #     self, tokenizer: Tokenizer, *, episode_decay: float, completion_decay: float
+    # ) -> Trajectory:
+    #     terminus = self.best_leaf(tokenizer)
+    #     return Trajectory(
+    #         episode=self,
+    #         terminus=terminus,
+    #         abs_advantage=terminus.all_abs_advantage(cache=True),
+    #         token_count=terminus.all_token_count(tokenizer),
+    #         episode_decay=episode_decay,
+    #         completion_decay=completion_decay,
+    #     )

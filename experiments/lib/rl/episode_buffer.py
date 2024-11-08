@@ -5,7 +5,8 @@ from .completion import SplitMethod
 from .completion_sampler import CompletionSampler
 from .episode import Episode
 from .episode_sampler import EpisodeSampler, EpisodeSamplerRouter
-from .trajectory import Trajectory
+
+# from .trajectory import Trajectory
 from ..tokenizer import Tokenizer
 from ..vllm import vllm_server_metrics
 
@@ -141,15 +142,15 @@ class EpisodeBuffer:
             )
         episode_sampler.num_goldilocks += 1
 
-    def trajectories(self) -> list[Trajectory]:
-        return sorted(
-            (
-                episode.best_trajectory(
-                    self.tokenizer,
-                    episode_decay=self.episode_decay,
-                    completion_decay=self.completion_decay,
-                )
-                for episode in self.episodes
-            ),
-            key=lambda trajectory: trajectory.score(),
-        )
+    # def trajectories(self) -> list[Trajectory]:
+    #     return sorted(
+    #         (
+    #             episode.best_trajectory(
+    #                 self.tokenizer,
+    #                 episode_decay=self.episode_decay,
+    #                 completion_decay=self.completion_decay,
+    #             )
+    #             for episode in self.episodes
+    #         ),
+    #         key=lambda trajectory: trajectory.score(),
+    #     )
