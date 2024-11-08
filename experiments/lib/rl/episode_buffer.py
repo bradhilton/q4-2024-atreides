@@ -1,10 +1,11 @@
 import asyncio
-from typing import Coroutine, Optional
+from typing import Coroutine
 
 from .completion import SplitMethod
 from .completion_sampler import CompletionSampler
 from .episode import Episode
 from .episode_sampler import EpisodeSampler, EpisodeSamplerRouter
+from .trajectory import Trajectory
 from ..tokenizer import Tokenizer
 from ..vllm import vllm_server_metrics
 
@@ -18,6 +19,8 @@ class EpisodeBuffer:
         branch_factor: int,
         split_method: SplitMethod,
         size: int,
+        episode_decay: float,
+        completion_decay: float,
         sleep_time: float = 5.0,
         start_buffering: bool = False,
     ) -> None:
@@ -27,6 +30,8 @@ class EpisodeBuffer:
         self.branch_factor = branch_factor
         self.split_method: SplitMethod = split_method
         self.size = size
+        self.episode_decay = episode_decay
+        self.completion_decay = completion_decay
         self.sleep_time = sleep_time
         self.pending_episodes: list[tuple[asyncio.Task[Episode], EpisodeSampler]] = []
         self.episodes: list[Episode] = []
@@ -135,3 +140,16 @@ class EpisodeBuffer:
                 EpisodeSampler(episode.get_similar_episode)
             )
         episode_sampler.num_goldilocks += 1
+
+    def trajectories(self) -> list[Trajectory]:
+        return sorted(
+            (
+                episode.best_trajectory(
+                    self.tokenizer,
+                    episode_decay=self.episode_decay,
+                    completion_decay=self.completion_decay,
+                )
+                for episode in self.episodes
+            ),
+            key=lambda trajectory: trajectory.score(),
+        )

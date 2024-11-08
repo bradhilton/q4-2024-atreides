@@ -95,6 +95,6 @@ def vllm_server_metrics(last_n_lines: int = 5) -> tuple[int, int]:
         if len(log_str.splitlines()) == last_n_lines:
             return vllm_server_metrics(last_n_lines * 2)
         else:
-            raise ValueError("No metrics found in log file")
+            return (0, 0)
     last_match = matches[-1]
     return (int(last_match.group(1)), int(last_match.group(2)))
