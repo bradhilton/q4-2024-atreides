@@ -97,5 +97,5 @@ class Episode:
                 if not where_leaf_or_ancestor_is_splittable
                 or any(c.can_split() for c in completion.ancestors(including_self=True))
             ),
-            key=lambda c: c.all_abs_advantage() / c.all_token_count(tokenizer),
+            key=lambda c: c.all_abs_advantage_per_token(tokenizer, cache=True),
         )

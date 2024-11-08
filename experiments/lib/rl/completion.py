@@ -71,6 +71,7 @@ class Completion(BaseModel):
     # Next state, action, reward triples
     children: set["Completion"] = set()
     weight: float = 1.0
+    _cached_value: Optional[float] = None
 
     def commit(self, reward: Optional[float] = None) -> None:
         """
@@ -84,12 +85,14 @@ class Completion(BaseModel):
         """
         if reward is not None:
             self.reward = reward
+            self._cached_value = None
         if not self.parent:
             return
         self.parent.commit()
         self.parent.children.add(self)
+        self.parent._cached_value = None
 
-    def value(self) -> float:
+    def value(self, cache: bool = False) -> float:
         """
         Estimates the undiscounted Q-value for the current state-action (`parent`, `messages`) pair.
 
@@ -99,11 +102,17 @@ class Completion(BaseModel):
         Returns:
             float: Estimated Q-value for the state-action pair.
         """
-        return self.reward + (
-            sum(c.value() for c in self.children) / max(len(self.children), 1)
+        if cache and self._cached_value is not None:
+            return self._cached_value
+        value = self.reward + (
+            sum(c.value(cache=cache) for c in self.children)
+            / max(len(self.children), 1)
         )
+        if cache:
+            self._cached_value = value
+        return value
 
-    def advantage(self) -> float:
+    def advantage(self, cache: bool = False) -> float:
         """
         Calculates the advantage value for this completion relative to its parent.
 
@@ -120,7 +129,10 @@ class Completion(BaseModel):
         """
         if self.parent is None:
             return 0.0
-        return (self.value() - (self.parent.value() - self.parent.reward)) * self.weight
+        return (
+            self.value(cache=cache)
+            - (self.parent.value(cache=cache) - self.parent.reward)
+        ) * self.weight
 
     def adjustment(self, lambda_: float = 1.0) -> float:
         return 1 - (
@@ -141,10 +153,15 @@ class Completion(BaseModel):
     def adjusted_advantage(self, lambda_: float = 1.0) -> float:
         return self.advantage() * self.adjustment(lambda_)
 
-    def all_abs_advantage(self) -> float:
-        return abs(self.advantage()) + (
-            self.parent.all_abs_advantage() if self.parent else 0
+    def all_abs_advantage(self, cache: bool = False) -> float:
+        return abs(self.advantage(cache=cache)) + (
+            self.parent.all_abs_advantage(cache=cache) if self.parent else 0
         )
+
+    def all_abs_advantage_per_token(
+        self, tokenizer: Tokenizer, cache: bool = False
+    ) -> float:
+        return self.all_abs_advantage(cache=cache) / self.all_token_count(tokenizer)
 
     def ancestors(self, including_self: bool = False) -> Iterable["Completion"]:
         if including_self:
@@ -154,7 +171,9 @@ class Completion(BaseModel):
         yield self.parent
         yield from self.parent.ancestors()
 
-    def descendants(self) -> Iterable["Completion"]:
+    def descendants(self, including_self: bool = False) -> Iterable["Completion"]:
+        if including_self:
+            yield self
         for child in self.children:
             yield child
             yield from child.descendants()
