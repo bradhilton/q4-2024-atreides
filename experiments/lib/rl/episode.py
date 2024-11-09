@@ -81,7 +81,7 @@ class Episode:
         split_method: SplitMethod,
         split_separators: Optional[set[str]],
     ) -> Optional[Completion]:
-        if self.completion.children:
+        if not self.completion.children:
             return self.completion
         try:
             leaf = self.best_leaf(
@@ -98,7 +98,9 @@ class Episode:
                 ),
                 key=lambda c: abs(c.advantage()) * c.split_weight(by=split_method),
             )
-            assert parent.split(by=split_method), "Unable to split completion"
+            assert parent.split(
+                by=split_method, separators=split_separators
+            ), "Unable to split completion"
             return parent
         except BaseException as e:
             print(type(e), e)

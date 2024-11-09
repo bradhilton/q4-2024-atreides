@@ -282,11 +282,11 @@ class Completion(BaseModel):
         )
 
     def can_split(self, by: SplitMethod, separators: Optional[set[str]] = None) -> bool:
-        num_split_points = 0
+        positive_weights = 0
         for weight in self._split_weights(by, separators=separators):
-            if weight:
-                num_split_points += 1
-            if num_split_points > 1:
+            if weight > 0:
+                positive_weights += 1
+            if positive_weights > 1:
                 return True
         return False
 
@@ -309,15 +309,29 @@ class Completion(BaseModel):
             bool: Whether the completion was successfully split.
         """
         split_weights = list(self._split_weights(by, separators=separators))
+        assert (
+            separators is None or len(split_weights) == self._num_token_logprobs()
+        ), "Number of weights does not match number of tokens."
         if len(split_weights) < 2:
             return False
         cumsum = np.cumsum(split_weights)
-        assert separators is None or cumsum[-1] == self.split_weight(
-            by
+        np.isclose(cumsum[-1], self.split_weight(by))
+        assert separators is None or np.isclose(
+            cumsum[-1], self.split_weight(by)
         ), "Grouped weights do not sum to total weight."
-        split = np.searchsorted(cumsum, cumsum[-1] / 2, side="right")
-        assert split != 0 and split != len(split_weights), "Invalid split point."
+        split = np.searchsorted(cumsum, max(cumsum[-1] / 2, cumsum[0]), side="right")
+        assert split != 0, "Cannot split at start of completion."
+        assert split != len(split_weights), "Cannot split at end of completion."
         assert split_weights[split] != 0, "Split point has zero weight."
+        # if separators is not None:
+        #     tokens = list(
+        #         token_logprob.token
+        #         for sequence in self._token_logprob_sequences()
+        #         for token_logprob in sequence
+        #     )
+        #     assert (
+        #         split_weights[split - 1] == 0
+        #     ), f"Split point ({tokens[split]}) is not after a separator ({tokens[split-1]}) or the weight ({split_weights[split-1]}) is not zero: {tokens}"
         i = 0
         for j, choice in enumerate(self.messages):
             if (

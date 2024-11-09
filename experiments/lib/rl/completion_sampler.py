@@ -33,6 +33,7 @@ class CompletionSampler:
         self,
         parent: Completion,
         continue_last_message_if_assistant: bool = True,
+        strip: set[str] = set(),
         **kwargs: Unpack[Kwargs],
     ) -> list[Completion]:
         messages = parent.all_message_params()
@@ -104,7 +105,11 @@ class CompletionSampler:
         return [
             Completion(
                 parent=parent,
-                messages=[self._remove_prefix(choice, prefix)],
+                messages=[
+                    self._remove_prefix_and_unwanted_leading_tokens(
+                        choice, prefix, strip
+                    )
+                ],
                 weight=parent.weight,
             )
             for choice in chat_completion.choices
@@ -126,9 +131,14 @@ class CompletionSampler:
             return model.id
         raise RuntimeError("No models available")
 
-    def _remove_prefix(self, choice: Choice, prefix: str) -> Choice:
+    def _remove_prefix_and_unwanted_leading_tokens(
+        self, choice: Choice, prefix: str, strip: set[str]
+    ) -> Choice:
         if choice.message.content:
             choice.message.content = choice.message.content.removeprefix(prefix)
         if choice.message.refusal:
             choice.message.refusal = choice.message.refusal.removeprefix(prefix)
+        if not choice.logprobs:
+            return choice
+        token_logprobs = choice.logprobs.content or choice.logprobs.refusal
         return choice
