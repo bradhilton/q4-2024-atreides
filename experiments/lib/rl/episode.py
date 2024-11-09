@@ -56,29 +56,46 @@ class Episode:
         completion_sampler: CompletionSampler,
         tokenizer: Tokenizer,
         branch_factor: int,
+        fork_decay: float = 1.0,
         split_by: SplitMethod = "count",
+        split_separators: Optional[set[str]] = None,
     ) -> bool:
-        parent = self.get_sampleable_parent(tokenizer, split_by)
+        parent = self.get_sampleable_parent(tokenizer, split_by, split_separators)
         if parent is None:
             return False
         completions = await completion_sampler.sample_completions(
             parent,
             n=branch_factor - len(parent.children),
         )
+        if parent.children:
+            for completion in completions:
+                completion.weight *= fork_decay
         on_sample = self.on_sample(completions)
         if isinstance(on_sample, Coroutine):
             await on_sample
         return True
 
     def get_sampleable_parent(
-        self, tokenizer: Tokenizer, split_method: SplitMethod
+        self,
+        tokenizer: Tokenizer,
+        split_method: SplitMethod,
+        split_separators: Optional[set[str]],
     ) -> Optional[Completion]:
-        if len(self.completion.children) == 0:
+        if self.completion.children:
             return self.completion
         try:
-            leaf = self.best_leaf(tokenizer, where_leaf_or_ancestor_is_splittable=True)
+            leaf = self.best_leaf(
+                tokenizer,
+                split_method=split_method,
+                split_separators=split_separators,
+                where_leaf_or_ancestor_is_splittable=True,
+            )
             parent = max(
-                (c for c in leaf.ancestors(including_self=True) if c.can_split()),
+                (
+                    c
+                    for c in leaf.ancestors(including_self=True)
+                    if c.can_split(by=split_method, separators=split_separators)
+                ),
                 key=lambda c: abs(c.advantage()) * c.split_weight(by=split_method),
             )
             assert parent.split(by=split_method), "Unable to split completion"
@@ -90,6 +107,8 @@ class Episode:
         self,
         tokenizer: Tokenizer,
         *,
+        split_method: SplitMethod,
+        split_separators: Optional[set[str]] = None,
         where_leaf_or_ancestor_is_splittable: Optional[Literal[True]] = None,
         cache: bool = True,
     ) -> Completion:
@@ -98,7 +117,10 @@ class Episode:
                 completion
                 for completion in self.completion.leaves()
                 if not where_leaf_or_ancestor_is_splittable
-                or any(c.can_split() for c in completion.ancestors(including_self=True))
+                or any(
+                    c.can_split(split_method, split_separators)
+                    for c in completion.ancestors(including_self=True)
+                )
             ),
             key=lambda c: c.all_abs_advantage_per_token(tokenizer, cache=cache),
         )

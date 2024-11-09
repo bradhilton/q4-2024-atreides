@@ -1,6 +1,4 @@
-from itertools import chain
 import numpy as np
-from openai.types.chat import ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice, ChoiceLogprobs
 from openai.types.chat.chat_completion_assistant_message_param import (
     ChatCompletionAssistantMessageParam,
@@ -28,7 +26,6 @@ from pydantic import (
     model_validator,
     SkipValidation,
 )
-from pydantic._internal._model_construction import ModelMetaclass
 from typing import (
     cast,
     Iterable,
@@ -68,7 +65,6 @@ class Completion(BaseModel):
     parent: Optional["Completion"] = cast(None, Field(None, exclude=True))  # State
     messages: list[Union[ChatCompletionMessageParam, Choice]] = []  # Action
     reward: float = 0.0  # Reward
-    # Next state, action, reward triples
     children: set["Completion"] = set()
     weight: float = 1.0
     _cached_value: Optional[float] = None
@@ -134,24 +130,24 @@ class Completion(BaseModel):
             - (self.parent.value(cache=cache) - self.parent.reward)
         ) * self.weight
 
-    def adjustment(self, lambda_: float = 1.0) -> float:
-        return 1 - (
-            lambda_
-            / (
-                lambda_
-                + max(sum(c.adjustment(lambda_) for c in self.children), 0.5) * 2
-            )
-        )
+    # def adjustment(self, lambda_: float = 1.0) -> float:
+    #     return 1 - (
+    #         lambda_
+    #         / (
+    #             lambda_
+    #             + max(sum(c.adjustment(lambda_) for c in self.children), 0.5) * 2
+    #         )
+    #     )
 
-    def adjusted_value(self, lambda_: float = 1.0) -> float:
-        if not self.parent:
-            return self.value()
-        return (self.value() - self.parent.value()) * self.adjustment(
-            lambda_
-        ) + self.parent.value()
+    # def adjusted_value(self, lambda_: float = 1.0) -> float:
+    #     if not self.parent:
+    #         return self.value()
+    #     return (self.value() - self.parent.value()) * self.adjustment(
+    #         lambda_
+    #     ) + self.parent.value()
 
-    def adjusted_advantage(self, lambda_: float = 1.0) -> float:
-        return self.advantage() * self.adjustment(lambda_)
+    # def adjusted_advantage(self, lambda_: float = 1.0) -> float:
+    #     return self.advantage() * self.adjustment(lambda_)
 
     def all_abs_advantage(self, cache: bool = False) -> float:
         return abs(self.advantage(cache=cache)) + (
@@ -285,23 +281,21 @@ class Completion(BaseModel):
             self.parent.all_token_count(tokenizer) if self.parent else 0
         )
 
-    def can_split(self) -> bool:
-        num_logprobs = 0
-        for choice in self.messages:
-            if (
-                isinstance(choice, Choice)
-                and choice.logprobs
-                and choice.logprobs.content
-            ):
-                num_logprobs += len(choice.logprobs.content)
-                if num_logprobs > 1:
-                    return True
+    def can_split(self, by: SplitMethod, separators: Optional[set[str]] = None) -> bool:
+        num_split_points = 0
+        for weight in self._split_weights(by, separators=separators):
+            if weight:
+                num_split_points += 1
+            if num_split_points > 1:
+                return True
         return False
 
-    def split_weight(self, by: SplitMethod) -> float:
-        return sum(self._split_weights(by))
+    def split_weight(
+        self, by: SplitMethod, separators: Optional[set[str]] = None
+    ) -> float:
+        return sum(self._split_weights(by, separators=separators))
 
-    def split(self, by: SplitMethod) -> bool:
+    def split(self, by: SplitMethod, separators: Optional[set[str]] = None) -> bool:
         """
         Creates a new child completion and splits the completable contents between the parent (this) and the child.
 
@@ -309,15 +303,21 @@ class Completion(BaseModel):
 
         Args:
             by (Literal["count", "prob", "logprob"]): The weighting method for splitting the completion.
+            separators (Optional[set[str]]): An optional set of separators to group tokens when splitting.
 
         Returns:
             bool: Whether the completion was successfully split.
         """
-        split_weights = list(self._split_weights(by))
+        split_weights = list(self._split_weights(by, separators=separators))
         if len(split_weights) < 2:
             return False
         cumsum = np.cumsum(split_weights)
-        split = np.searchsorted(cumsum, cumsum[-1] / 2)
+        assert separators is None or cumsum[-1] == self.split_weight(
+            by
+        ), "Grouped weights do not sum to total weight."
+        split = np.searchsorted(cumsum, cumsum[-1] / 2, side="right")
+        assert split != 0 and split != len(split_weights), "Invalid split point."
+        assert split_weights[split] != 0, "Split point has zero weight."
         i = 0
         for j, choice in enumerate(self.messages):
             if (
@@ -368,14 +368,33 @@ class Completion(BaseModel):
                 return True
         return False
 
-    def _split_weights(self, by: SplitMethod) -> Iterable[float]:
+    def _split_weights(
+        self, by: SplitMethod, separators: Optional[set[str]]
+    ) -> Iterable[float]:
+        weight = 0
+        n = 0
         for sequence in self._token_logprob_sequences():
+            separator = True
             for token_logprob in sequence:
-                yield dict(
+                if (
+                    separator
+                    and n
+                    and (separators is None or not token_logprob.token in separators)
+                ):
+                    yield weight
+                    yield from (0 for _ in range(n - 1))
+                    weight = 0
+                    n = 0
+                weight += dict(
                     count=lambda _: 1,
                     prob=lambda x: 1 - np.exp(x),
                     logprob=lambda x: -x,
                 )[by](token_logprob.logprob)
+                n += 1
+                separator = separators is None or token_logprob.token in separators
+        if n:
+            yield weight
+            yield from (0 for _ in range(n - 1))
 
     def _token_logprob_sequences(self) -> Iterable[list[ChatCompletionTokenLogprob]]:
         return (

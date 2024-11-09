@@ -1,5 +1,5 @@
 import asyncio
-from typing import Coroutine
+from typing import Coroutine, Optional
 
 from .completion import SplitMethod
 from .completion_sampler import CompletionSampler
@@ -19,9 +19,11 @@ class EpisodeBuffer:
         tokenizer: Tokenizer,
         branch_factor: int,
         split_method: SplitMethod,
+        split_separators: Optional[set[str]],
         size: int,
         episode_decay: float,
         completion_decay: float,
+        fork_decay: float,
         sleep_time: float = 5.0,
         start_buffering: bool = False,
     ) -> None:
@@ -30,9 +32,11 @@ class EpisodeBuffer:
         self.tokenizer = tokenizer
         self.branch_factor = branch_factor
         self.split_method: SplitMethod = split_method
+        self.split_separators = split_separators
         self.size = size
         self.episode_decay = episode_decay
         self.completion_decay = completion_decay
+        self.fork_decay = fork_decay
         self.sleep_time = sleep_time
         self.pending_episodes: list[tuple[asyncio.Task[Episode], EpisodeSampler]] = []
         self.episodes: list[Episode] = []
@@ -100,7 +104,9 @@ class EpisodeBuffer:
                         self.completion_sampler,
                         self.tokenizer,
                         self.branch_factor,
+                        self.fork_decay,
                         self.split_method,
+                        self.split_separators,
                     )
                 )
             await asyncio.sleep(self.sleep_time)
@@ -113,7 +119,9 @@ class EpisodeBuffer:
             self.completion_sampler,
             self.tokenizer,
             self.branch_factor,
+            self.fork_decay,
             self.split_method,
+            self.split_separators,
         ):
             return self.episodes.remove(episode)
         if (

@@ -63,34 +63,34 @@ class CompletionSampler:
                 )
             untyped_kwargs["extra_body"]["add_generation_prompt"] = False
             untyped_kwargs["extra_body"]["continue_final_message"] = True
-            import copy
-            import random
+            # import copy
+            # import random
 
-            if prefix and random.random() < 0.25 and parent.advantage(cache=True) < 0:
-                untyped_kwargs["messages"] = copy.deepcopy(untyped_kwargs["messages"])
-                untyped_kwargs["messages"][-1]["content"] += random.choice(
-                    ["...", "—"]
-                ) + random.choice(
-                    [
-                        "",
-                        "",
-                        "",
-                        "hmm",
-                        "wait a second",
-                        "sorry",
-                        "sorry, I made a mistake",
-                        "no",
-                        "no",
-                        "but",
-                        "however",
-                        "alternatively",
-                        "actually",
-                        "technically",
-                        "what I mean to say is",
-                        "hold on",
-                        "let's take a step back",
-                    ]
-                )  # type: ignore
+            # if prefix and random.random() < 0.25 and parent.advantage(cache=True) < 0:
+            #     untyped_kwargs["messages"] = copy.deepcopy(untyped_kwargs["messages"])
+            #     untyped_kwargs["messages"][-1]["content"] += random.choice(
+            #         ["...", "—"]
+            #     ) + random.choice(
+            #         [
+            #             "",
+            #             "",
+            #             "",
+            #             "hmm",
+            #             "wait a second",
+            #             "sorry",
+            #             "sorry, I made a mistake",
+            #             "no",
+            #             "no",
+            #             "but",
+            #             "however",
+            #             "alternatively",
+            #             "actually",
+            #             "technically",
+            #             "what I mean to say is",
+            #             "hold on",
+            #             "let's take a step back",
+            #         ]
+            #     )  # type: ignore
         else:
             prefix = ""
         if not "model" in untyped_kwargs:
@@ -105,6 +105,7 @@ class CompletionSampler:
             Completion(
                 parent=parent,
                 messages=[self._remove_prefix(choice, prefix)],
+                weight=parent.weight,
             )
             for choice in chat_completion.choices
         ]
