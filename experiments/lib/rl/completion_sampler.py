@@ -66,10 +66,8 @@ class CompletionSampler:
             import copy
             import random
 
-            if random.random() < 0.25 and parent.advantage(cache=True) < 0:
-                untyped_kwargs["messages"][-1] = copy.deepcopy(
-                    untyped_kwargs["messages"][-1]
-                )
+            if prefix and random.random() < 0.25 and parent.advantage(cache=True) < 0:
+                untyped_kwargs["messages"] = copy.deepcopy(untyped_kwargs["messages"])
                 untyped_kwargs["messages"][-1]["content"] += random.choice(
                     ["...", "—"]
                 ) + random.choice(
@@ -92,7 +90,7 @@ class CompletionSampler:
                         "hold on",
                         "let's take a step back",
                     ]
-                )
+                )  # type: ignore
         else:
             prefix = ""
         if not "model" in untyped_kwargs:
