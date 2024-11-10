@@ -65,6 +65,7 @@ class Episode:
             return False
         completions = await completion_sampler.sample_completions(
             parent,
+            strip=split_separators or set(),
             n=branch_factor - len(parent.children),
         )
         if parent.children:

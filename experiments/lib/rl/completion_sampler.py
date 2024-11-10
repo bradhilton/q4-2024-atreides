@@ -134,11 +134,15 @@ class CompletionSampler:
     def _remove_prefix_and_unwanted_leading_tokens(
         self, choice: Choice, prefix: str, strip: set[str]
     ) -> Choice:
+        if strip and choice.logprobs:
+            logprobs = choice.logprobs.content or choice.logprobs.refusal or []
+            while logprobs:
+                if logprobs[0].token in strip:
+                    prefix += logprobs.pop(0).token
+                else:
+                    break
         if choice.message.content:
             choice.message.content = choice.message.content.removeprefix(prefix)
         if choice.message.refusal:
             choice.message.refusal = choice.message.refusal.removeprefix(prefix)
-        if not choice.logprobs:
-            return choice
-        token_logprobs = choice.logprobs.content or choice.logprobs.refusal
         return choice
