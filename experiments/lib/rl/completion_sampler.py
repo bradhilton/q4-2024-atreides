@@ -95,7 +95,7 @@ class CompletionSampler:
         else:
             prefix = ""
         if not "model" in untyped_kwargs:
-            untyped_kwargs["model"] = await self._get_model()
+            untyped_kwargs["model"] = await self.get_model()
 
         async with self.semaphore:
             chat_completion = cast(
@@ -111,20 +111,21 @@ class CompletionSampler:
                     )
                 ],
                 weight=parent.weight,
+                model=untyped_kwargs["model"],
             )
             for choice in chat_completion.choices
         ]
 
     _get_model_task: Optional[asyncio.Task[str]] = None
 
-    async def _get_model(self) -> str:
+    async def get_model(self) -> str:
         if self.model:
             return self.model
         if self._get_model_task is None:
-            self._get_model_task = asyncio.create_task(self.__get_model())
+            self._get_model_task = asyncio.create_task(self._get_model())
         return await self._get_model_task
 
-    async def __get_model(self) -> str:
+    async def _get_model(self) -> str:
         async for model in self.client.models.list():
             print(f"Using model: {model.id}")
             self.model = model.id

@@ -278,7 +278,7 @@ class Clue:
             return f"{players[player]} asked if anyone had {' or '.join(prefixed[card] for card in suggestion)}:\n{'\n'.join(f'- {players[responding_player]} showed {players[player]} {prefixed[card] if player == self.winner or responding_player == self.winner else 'a card'}' if card is not None else f'- {players[responding_player]} did not have any of the cards' for responding_player, card in responses.items())}"
 
         return f"""
-        On a {random.choice(("cool", "warm"))} {random.choice(("spring", "autumn"))} {random.choice(("morning", "afternoon", "evening", "day"))} {comma_and_join(players[:self.num_players])} and sat down to play a {random.choice(("friendly", "competitive", "casual"))} {random.choice(("mystery", "deduction", "sleuthing"))} game.
+        On a {random.choice(("cool", "warm"))} {random.choice(("spring", "autumn"))} {random.choice(("morning", "afternoon", "evening", "day"))} {comma_and_join(players[:self.num_players])} sat down to play a {random.choice(("friendly", "competitive", "casual"))} {random.choice(("mystery", "deduction", "sleuthing"))} game.
 
         They {random.choice(("assembled", "gathered"))} {len(self.elements)} {random.choice(("decks", "groups", "stacks"))} of cards, each for a {random.choice(("different", "separate"))} {random.choice(("category", "type"))} of {random.choice(("information", "data"))} composed of the following:
 

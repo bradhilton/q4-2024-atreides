@@ -67,7 +67,9 @@ class Completion(BaseModel):
     reward: float = 0.0  # Reward
     children: set["Completion"] = set()
     weight: float = 1.0
-    _cached_value: Optional[float] = None
+    model: Optional[str] = None
+    fork: bool = False
+    _cached_values: dict[tuple[Optional[str], Optional[bool]], float] = {}
 
     def commit(self, reward: Optional[float] = None) -> None:
         """
@@ -81,31 +83,44 @@ class Completion(BaseModel):
         """
         if reward is not None:
             self.reward = reward
-            self._cached_value = None
+            self._cached_values = {}
         if not self.parent:
             return
         self.parent.commit()
         self.parent.children.add(self)
-        self.parent._cached_value = None
+        self.parent._cached_values = {}
 
-    def value(self, cache: bool = False) -> float:
+    def value(
+        self,
+        cache: bool = False,
+        model: Optional[str] = None,
+        fork: Optional[bool] = None,
+    ) -> float:
         """
         Estimates the undiscounted Q-value for the current state-action (`parent`, `messages`) pair.
 
         Computes the Q-value by summing the immediate reward (`reward`) and the
         average of the values of sampled successor state-action pairs (`children`).
 
+        Args:
+            cache (bool): Whether to cache Q-value estimates for faster retrieval.
+            model (Optional[str]): Optionally limit child Q-value estimates to a specific model.
+            fork (Optional[bool]): Optionally limit child Q-value estimates to only forked or unforked completions.
+
         Returns:
             float: Estimated Q-value for the state-action pair.
         """
-        if cache and self._cached_value is not None:
-            return self._cached_value
-        value = self.reward + (
-            sum(c.value(cache=cache) for c in self.children)
-            / max(len(self.children), 1)
-        )
+        if cache and (model, fork) in self._cached_values:
+            return self._cached_values[(model, fork)]
+        child_values = [
+            completion.value(cache=cache, model=model, fork=fork)
+            for completion in self.children
+            if (model is None or completion.model is None or completion.model == model)
+            and (fork is None or completion.fork == fork)
+        ]
+        value = self.reward + (sum(child_values) / max(len(child_values), 1))
         if cache:
-            self._cached_value = value
+            self._cached_values[(model, fork)] = value
         return value
 
     def advantage(self, cache: bool = False) -> float:
@@ -368,6 +383,7 @@ class Completion(BaseModel):
                     + self.messages[j + 1 :],
                     reward=self.reward,
                     weight=self.weight,
+                    model=self.model,
                 )
                 child.children = self.children
                 for grandchild in child.children:

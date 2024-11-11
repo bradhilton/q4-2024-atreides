@@ -124,6 +124,7 @@ class EpisodeBuffer:
             self.split_separators,
         ):
             return self.episodes.remove(episode)
+        goldilocks = True
         if (
             episode.get_easier_episode
             and episode.min_value is not None
@@ -132,7 +133,7 @@ class EpisodeBuffer:
             self.episode_sampler_router.other_samplers.append(
                 EpisodeSampler(episode.get_easier_episode)
             )
-            return self.episodes.remove(episode)
+            goldilocks = False
         elif (
             episode.get_harder_episode
             and episode.max_value is not None
@@ -141,14 +142,15 @@ class EpisodeBuffer:
             self.episode_sampler_router.other_samplers.append(
                 EpisodeSampler(episode.get_harder_episode)
             )
-            return self.episodes.remove(episode)
-        elif all(c.advantage() == 0 for c in episode.completion.children):
-            return self.episodes.remove(episode)
+            goldilocks = False
         elif episode.get_similar_episode:
             self.episode_sampler_router.other_samplers.append(
                 EpisodeSampler(episode.get_similar_episode)
             )
-        episode_sampler.num_goldilocks += 1
+        if all(c.advantage() == 0 for c in episode.completion.children):
+            return self.episodes.remove(episode)
+        if goldilocks:
+            episode_sampler.num_goldilocks += 1
 
     # def trajectories(self) -> list[Trajectory]:
     #     return sorted(

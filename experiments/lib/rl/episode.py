@@ -63,14 +63,20 @@ class Episode:
         parent = self.get_sampleable_parent(tokenizer, split_by, split_separators)
         if parent is None:
             return False
+        model = await completion_sampler.get_model()
+        num_children = sum(1 for child in parent.children if child.model == model)
+        n = branch_factor - num_children
+        if n <= 0:
+            return False
         completions = await completion_sampler.sample_completions(
             parent,
             strip=split_separators or set(),
-            n=branch_factor - len(parent.children),
+            n=n,
         )
-        if parent.children:
+        if num_children:
             for completion in completions:
                 completion.weight *= fork_decay
+                completion.fork = True
         on_sample = self.on_sample(completions)
         if isinstance(on_sample, Coroutine):
             await on_sample
@@ -91,6 +97,9 @@ class Episode:
                 split_separators=split_separators,
                 where_leaf_or_ancestor_is_splittable=True,
             )
+        except ValueError:
+            return None
+        try:
             parent = max(
                 (
                     c
@@ -121,7 +130,7 @@ class Episode:
                 for completion in self.completion.leaves()
                 if not where_leaf_or_ancestor_is_splittable
                 or any(
-                    c.can_split(split_method, split_separators)
+                    c.can_split(split_method, separators=split_separators)
                     for c in completion.ancestors(including_self=True)
                 )
             ),
