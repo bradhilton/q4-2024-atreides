@@ -26,6 +26,10 @@ class Tokenizer:
         )
         self.token_counts: dict[str, int] = {}
 
+    def get_pad_token_id(self) -> Optional[int]:
+        tokenizer = self.llm.get_tokenizer()
+        return getattr(tokenizer, "pad_token_id", None) or tokenizer.eos_token_id
+
     def get_token_count(self, content: str) -> int:
         if content not in self.token_counts:
             self.token_counts[content] = len(self.llm.get_tokenizer().encode(content))
@@ -62,7 +66,7 @@ class Tokenizer:
             continue_final_message=continue_final_message,
         )
         self.llm.generate = generate  # type: ignore
-        pad_id = getattr(tokenizer, "pad_token_id", None) or tokenizer.eos_token_id
+        pad_id = self.get_pad_token_id()
         if type(messages[0]) != list:
             return torch.tensor(token_ids[0])
         elif concatenate:

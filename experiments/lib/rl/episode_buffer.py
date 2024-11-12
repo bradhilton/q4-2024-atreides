@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, Coroutine, Literal, Optional, Union
+from typing import Any, Coroutine, Optional
 
 from .completion import SplitMethod
 from .completion_sampler import CompletionSampler

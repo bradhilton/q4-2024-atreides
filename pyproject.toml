@@ -10,6 +10,7 @@ dependencies = [
     "black>=24.10.0",
     "datasets>=3.0.1",
     "fairscale>=0.4.13",
+    "fastapi[standard]>=0.115.3",
     "huggingface-hub[hf-transfer]>=0.25.1",
     "llama-stack>=0.0.39",
     "matplotlib>=3.9.2",
