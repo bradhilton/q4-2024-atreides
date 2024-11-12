@@ -675,7 +675,7 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
             start = time.perf_counter()
             if self._is_rank_zero:
                 log.info("Getting optimizer state dict...")
-            if not self._optimizer_in_bwd:
+            if self._optimizer:
                 opt_state_dict = training.get_full_optimizer_state_dict(
                     self._optimizer,
                     self._is_rank_zero,
@@ -733,7 +733,7 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
         world_size, rank = training.get_world_size_and_rank()
 
         # zero out the gradients before starting training
-        if not self._optimizer_in_bwd:
+        if self._optimizer:
             self._optimizer.zero_grad()
         else:
             for opt in self._optim_ckpt_wrapper.optim_map.values():
@@ -815,7 +815,7 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
 
                 # Step with optimizer
                 if (idx + 1) % self._gradient_accumulation_steps == 0:
-                    if not self._optimizer_in_bwd:
+                    if self._optimizer:
                         if training.is_distributed():
                             # Get total number of tokens across all ranks to normalize gradients
                             torch.distributed.all_reduce(num_tokens)
@@ -848,13 +848,7 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
                         time_per_step = time.perf_counter() - t0
                         log_dict = {
                             "loss": loss_to_log,
-                            "lr": get_lr(
-                                (
-                                    self._optimizer
-                                    if not self._optimizer_in_bwd
-                                    else self._optim_ckpt_wrapper
-                                ),
-                            ),
+                            "lr": get_lr(self._optimizer or self._optim_ckpt_wrapper),
                             "tokens_per_second_per_gpu": num_tokens
                             / (time_per_step * world_size),
                         }
