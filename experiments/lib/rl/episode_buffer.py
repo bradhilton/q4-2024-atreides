@@ -1,5 +1,5 @@
 import asyncio
-from typing import Coroutine, Optional
+from typing import Any, Coroutine, Literal, Optional, Union
 
 from .completion import SplitMethod
 from .completion_sampler import CompletionSampler
@@ -40,7 +40,7 @@ class EpisodeBuffer:
         self.sleep_time = sleep_time
         self.pending_episodes: list[tuple[asyncio.Task[Episode], EpisodeSampler]] = []
         self.episodes: list[Episode] = []
-        self.tasks: dict[Episode, asyncio.Task] = {}
+        self.tasks: dict[Episode, asyncio.Task[bool]] = {}
         self.episode_async_sample_exceptions: list[Exception] = []
         self.max_running_requests = 0
         self.buffer_task = (
@@ -58,7 +58,9 @@ class EpisodeBuffer:
 
     def weighted_size(self) -> float:
         return len(self.pending_episodes) + sum(
-            episode.weight for episode in self.episodes
+            episode.weight
+            for episode in self.episodes
+            if result(self.tasks[episode]) != False
         )
 
     async def buffer_indefinitely(self) -> None:
@@ -96,7 +98,12 @@ class EpisodeBuffer:
                 pending_requests,
             )
             for episode in sorted(
-                (episode for episode in self.episodes if self.tasks[episode].done()),
+                (
+                    episode
+                    for episode in self.episodes
+                    if self.tasks[episode].done()
+                    and result(self.tasks[episode]) != False
+                ),
                 key=lambda episode: episode.num_samples(),
             )[: self.max_running_requests - pending_requests]:
                 self.tasks[episode] = asyncio.create_task(
@@ -113,7 +120,7 @@ class EpisodeBuffer:
 
     async def process_new_episode(
         self, episode: Episode, episode_sampler: EpisodeSampler
-    ) -> None:
+    ) -> bool:
         self.episodes.append(episode)
         if not await episode.sample_completions(
             self.completion_sampler,
@@ -123,7 +130,7 @@ class EpisodeBuffer:
             self.split_method,
             self.split_separators,
         ):
-            return self.episodes.remove(episode)
+            return self.episodes.remove(episode) or False
         goldilocks = True
         if (
             episode.get_easier_episode
@@ -148,9 +155,10 @@ class EpisodeBuffer:
                 EpisodeSampler(episode.get_similar_episode)
             )
         if all(c.advantage() == 0 for c in episode.completion.children):
-            return self.episodes.remove(episode)
+            return self.episodes.remove(episode) or False
         if goldilocks:
             episode_sampler.num_goldilocks += 1
+        return True
 
     # def trajectories(self) -> list[Trajectory]:
     #     return sorted(
@@ -168,3 +176,10 @@ class EpisodeBuffer:
     def __del__(self) -> None:
         if self.buffer_task:
             self.buffer_task.cancel()
+
+
+def result(task: asyncio.Task) -> Any:
+    try:
+        return task.result()
+    except:
+        return None
