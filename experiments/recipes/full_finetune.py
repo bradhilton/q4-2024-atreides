@@ -484,8 +484,6 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
                     if hasattr(m, "rope_init"):
                         m.rope_init()
 
-                    model.load_state_dict(model_state_dict)
-
             # This method will convert the full model state dict into a sharded state
             # dict and load into the model
             training.load_from_full_model_state_dict(
