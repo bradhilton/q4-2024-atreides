@@ -50,7 +50,7 @@ checkpointer:
 resume_from_checkpoint: False
 
 # Fine-tuning arguments
-batch_size: 2
+batch_size: 12
 epochs: 3
 
 optimizer:
@@ -60,7 +60,7 @@ optimizer:
 loss:
   _component_: torchtune.modules.loss.CEWithChunkedOutputLoss
 max_steps_per_epoch: null
-compile: False  # pytorch compile, set to true for better perf/memory
+compile: True  # pytorch compile, set to true for better perf/memory
 optimizer_in_bwd: False  # True saves memory. Requires gradient_accumulation_steps=1
 gradient_accumulation_steps: 1  # Use to increase virtual batch size
 
