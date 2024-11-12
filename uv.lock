@@ -223,7 +223,7 @@ requires-dist = [
     { name = "tokenizers", specifier = ">=0.20.0" },
     { name = "torch", specifier = ">=2.4.0" },
     { name = "torchao", specifier = ">=0.6.1" },
-    { name = "torchtune", specifier = ">=0.3.1" },
+    { name = "torchtune", git = "https://github.com/pytorch/torchtune?tag=v0.4.0-rc2" },
     { name = "vllm", specifier = ">=0.6.3" },
     { name = "wandb", specifier = ">=0.18.3" },
 ]
@@ -2866,8 +2866,8 @@ wheels = [
 
 [[package]]
 name = "torchtune"
-version = "0.3.1"
-source = { registry = "https://pypi.org/simple" }
+version = "0.0.0"
+source = { git = "https://github.com/pytorch/torchtune?tag=v0.4.0-rc2#dd2f0d9bbf1c7e9322c40b297a5c25d696dbe697" }
 dependencies = [
     { name = "blobfile" },
     { name = "datasets" },
@@ -2880,9 +2880,6 @@ dependencies = [
     { name = "sentencepiece" },
     { name = "tiktoken" },
     { name = "tqdm" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/64/5e/09722b84ce4ee8eaec0d9b06a653a3c6ad0cb6efdbd23f1cbdeff834b567/torchtune-0.3.1-py3-none-any.whl", hash = "sha256:b409f2bb180ed444d50e2600c854654a8954dbfab9d655cf1461eeedf6a74094", size = 596650 },
 ]
 
 [[package]]

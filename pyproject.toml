@@ -22,7 +22,7 @@ dependencies = [
     "tokenizers>=0.20.0",
     "torch>=2.4.0",
     "torchao>=0.6.1",
-    "torchtune>=0.3.1",
+    "torchtune",
     "vllm>=0.6.3",
     "wandb>=0.18.3",
 ]
@@ -32,3 +32,6 @@ dev-dependencies = [
     "ipykernel>=6.29.5",
     "ipywidgets>=8.1.5",
 ]
+
+[tool.uv.sources]
+torchtune = { git = "https://github.com/pytorch/torchtune", tag = "v0.4.0-rc2" }

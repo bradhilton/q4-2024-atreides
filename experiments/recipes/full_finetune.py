@@ -435,7 +435,10 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
             )
             init_start = time.perf_counter()
 
-        with training.set_default_dtype(self._dtype), torch.device("meta"):
+        with (
+            training.set_default_dtype(self._dtype),
+            torch.device("meta") if training.is_distributed() else self._device,
+        ):
             model = config.instantiate(cfg_model)
 
         if self._compile:
@@ -460,36 +463,46 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
                 model, auto_wrap_policy={modules.TransformerSelfAttentionLayer}
             )
 
-        # For FSDP sharding
-        fsdp_shard_conditions = [
-            partial(
-                training.get_shard_conditions,
-                names_to_match=custom_sharded_layers,
+        if training.is_distributed():
+            # For FSDP sharding
+            fsdp_shard_conditions = [
+                partial(
+                    training.get_shard_conditions,
+                    names_to_match=custom_sharded_layers,
+                )
+            ]
+            training.shard_model(
+                model=model,
+                shard_conditions=fsdp_shard_conditions,
+                cpu_offload=fsdp_cpu_offload,
+                reshard_after_forward=reshard_after_forward,
             )
-        ]
-        training.shard_model(
-            model=model,
-            shard_conditions=fsdp_shard_conditions,
-            cpu_offload=fsdp_cpu_offload,
-            reshard_after_forward=reshard_after_forward,
-        )
 
-        with training.set_default_dtype(self._dtype), self._device:
-            for m in model.modules():
-                # RoPE is not covered in state dict
-                if hasattr(m, "rope_init"):
-                    m.rope_init()
+            with training.set_default_dtype(self._dtype), self._device:
+                for m in model.modules():
+                    # RoPE is not covered in state dict
+                    if hasattr(m, "rope_init"):
+                        m.rope_init()
 
-        # This method will convert the full model state dict into a sharded state
-        # dict and load into the model
-        training.load_from_full_model_state_dict(
-            model,
-            model_state_dict,
-            self._device,
-            self._is_rank_zero,
-            strict=True,
-            cpu_offload=fsdp_cpu_offload,
-        )
+                    model.load_state_dict(model_state_dict)
+
+            # This method will convert the full model state dict into a sharded state
+            # dict and load into the model
+            training.load_from_full_model_state_dict(
+                model,
+                model_state_dict,
+                self._device,
+                self._is_rank_zero,
+                strict=True,
+                cpu_offload=fsdp_cpu_offload,
+            )
+        else:
+            model.load_state_dict(model_state_dict)
+
+            # Validate model was loaded in with the expected dtype.
+            training.validate_expected_param_dtype(
+                model.named_parameters(), dtype=self._dtype
+            )
 
         # activation offloading
         self.activations_handling_ctx = training.get_act_offloading_ctx_manager(
@@ -506,8 +519,9 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
             memory_stats = training.get_memory_stats(device=self._device)
             training.log_memory_stats(memory_stats)
 
-        # synchronize before training begins
-        torch.distributed.barrier()
+        if training.is_distributed():
+            # synchronize before training begins
+            torch.distributed.barrier()
 
         return model
 
@@ -802,10 +816,11 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
                 # Step with optimizer
                 if (idx + 1) % self._gradient_accumulation_steps == 0:
                     if not self._optimizer_in_bwd:
-                        # Get total number of tokens across all ranks to normalize gradients
-                        torch.distributed.all_reduce(num_tokens)
-                        # This will ensure that the logged loss matches what we're optimizing
-                        torch.distributed.all_reduce(running_loss)
+                        if training.is_distributed():
+                            # Get total number of tokens across all ranks to normalize gradients
+                            torch.distributed.all_reduce(num_tokens)
+                            # This will ensure that the logged loss matches what we're optimizing
+                            torch.distributed.all_reduce(running_loss)
                         # Manually scale the gradients from unnormalized loss by total # of tokens
                         training.scale_grads(self._model, 1 / num_tokens)
                         if self._clip_grad_norm is not None:
@@ -896,18 +911,19 @@ def recipe_main(cfg: DictConfig) -> None:
         - Parameters specified in config (see available configs through ``tune ls``)
         - Overwritten by arguments from the command-line
     """
-    if not training.is_distributed():
-        raise RuntimeError(
-            "Distributed finetune recipe should be run via a distributed launcher."
-            "If using tune CLI, please specify --nnodes 1 and --nproc_per_node [num_gpus]"
+    if training.is_distributed():
+        init_process_group(backend="gloo" if cfg.device == "cpu" else "nccl")
+        if cfg.get("fsdp_cpu_offload", False):
+            # Utilize all available CPU cores for intra-op parallelism. This provides ~2x
+            # speed up when benchmarking fused AdamW on CPU
+            training.set_torch_num_threads()
+    else:
+        logger = utils.get_logger("INFO")
+        logger.debug(
+            "Training is not distributed. If you want to train on multiple GPUs and are using the tune CLI, specify --nnodes 1 and --nproc_per_node [num_gpus]"
         )
-    init_process_group(backend="gloo" if cfg.device == "cpu" else "nccl")
-    if cfg.get("fsdp_cpu_offload", False):
-        # Utilize all available CPU cores for intra-op parallelism. This provides ~2x
-        # speed up when benchmarking fused AdamW on CPU
-        training.set_torch_num_threads()
 
-    config.log_config(recipe_name="FullFinetuneRecipeDistributed", cfg=cfg)
+    config.log_config(recipe_name="FullFinetuneRecipe", cfg=cfg)
 
     recipe = FullFinetuneRecipeDistributed(cfg=cfg)
     recipe.setup(cfg=cfg)
