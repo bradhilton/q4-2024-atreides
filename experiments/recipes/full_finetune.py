@@ -34,7 +34,7 @@ from tqdm import tqdm
 log = utils.get_logger("DEBUG")
 
 
-class FullFinetuneRecipeDistributed(FTRecipeInterface):
+class FullFinetuneRecipe(FTRecipeInterface):
     """
     Full finetuning recipe for dense transformer-based LLMs such as Llama2. This recipe supports
     distributed training and can be run on a single node (1 to 8 GPUs).
@@ -876,7 +876,10 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
                         + self.profiler_warmup_steps
                         + self.profiler_active_steps
                     ):
-                        torch.cuda.memory._record_memory_history(enabled=None)
+                        torch.cuda.memory._record_memory_history(
+                            # Pylance infers the type of `enabled` as `str` though the function accepts `Literal[None, "state", "all"]`
+                            enabled=None  # type: ignore
+                        )
 
                     # Step profiler
                     # Note that this is called within gradient accumulation block, hence
@@ -891,7 +894,8 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
     def cleanup(self) -> None:
         if self._is_rank_zero:
             self._metric_logger.close()
-        destroy_process_group()
+        if training.is_distributed():
+            destroy_process_group()
 
 
 @config.parse
@@ -917,7 +921,7 @@ def recipe_main(cfg: DictConfig) -> None:
 
     config.log_config(recipe_name="FullFinetuneRecipe", cfg=cfg)
 
-    recipe = FullFinetuneRecipeDistributed(cfg=cfg)
+    recipe = FullFinetuneRecipe(cfg=cfg)
     recipe.setup(cfg=cfg)
     recipe.train()
     recipe.cleanup()

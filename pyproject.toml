@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "accelerate>=1.0.1",
-    "bitsandbytes>=0.44.1",
+    "bitsandbytes==0.42.0",
     "black>=24.10.0",
     "datasets>=3.0.1",
     "fairscale>=0.4.13",
