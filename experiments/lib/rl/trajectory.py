@@ -239,7 +239,6 @@ class IterableTrajectories(
 ):
     batch_api_address: tuple[str, int] = ("127.0.0.1", 8000)
     buffer: int = 1
-    client: httpx.AsyncClient = httpx.AsyncClient()
 
     def __iter__(self) -> Iterable[TrajectoryBatchTensorDict]:
         worker_info = get_worker_info()
@@ -251,6 +250,7 @@ class IterableTrajectories(
         else:  # single-process data loading
             start = 0
             stop = self.rows
+        client = httpx.AsyncClient()
         task: Optional[asyncio.Task[httpx.Response]] = None
         yield_indices = lambda: itertools.cycle(range(start, stop))
         buffer_indices = itertools.cycle(
@@ -266,7 +266,7 @@ class IterableTrajectories(
                     getattr(task, "_result") or asyncio.run(get_response(task))
                 )
                 task = asyncio.create_task(
-                    self.client.post(
+                    client.post(
                         f"http://{self.batch_api_address[0]}:{self.batch_api_address[1]}/trajectory-batch",
                         json=TrajectoryBatchRequest(
                             dir=self.dir,
@@ -281,9 +281,6 @@ class IterableTrajectories(
                     response = asyncio.run(get_response(task))
                 response.raise_for_status()
             yield self[yield_index]
-
-    def __del__(self) -> None:
-        asyncio.create_task(self.client.aclose())
 
 
 async def get_response(task: asyncio.Task[httpx.Response]) -> httpx.Response:

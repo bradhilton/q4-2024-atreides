@@ -263,7 +263,7 @@ class Completion(BaseModel):
     def token_advantages(self, cache: bool = False) -> Iterable[float]:
         advantage = self.advantage(cache=cache)
         num_token_logprobs = self._num_token_logprobs()
-        token_advantage = advantage / num_token_logprobs
+        token_advantage = advantage / max(num_token_logprobs, 1)
         return (token_advantage for _ in range(num_token_logprobs))
 
     def all_token_advantages(self, cache: bool = False) -> Iterable[float]:
