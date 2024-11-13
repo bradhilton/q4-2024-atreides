@@ -61,15 +61,28 @@ ChatCompletionMessageParam: TypeAlias = Union[
 SplitMethod = Literal["count", "prob", "logprob"]
 
 
-class Completion(BaseModel):
-    parent: Optional["Completion"] = cast(None, Field(None, exclude=True))  # State
-    messages: list[Union[ChatCompletionMessageParam, Choice]] = []  # Action
-    reward: float = 0.0  # Reward
-    children: set["Completion"] = set()
-    weight: float = 1.0
-    model: Optional[str] = None
-    fork: bool = False
-    _cached_values: dict[tuple[Optional[str], Optional[bool]], float] = {}
+class Completion:
+    def __init__(
+        self,
+        parent: Optional["Completion"] = None,
+        messages: Optional[list[Union[ChatCompletionMessageParam, Choice]]] = None,
+        reward: float = 0.0,
+        children: Optional[set["Completion"]] = None,
+        weight: float = 1.0,
+        model: Optional[str] = None,
+        fork: bool = False,
+    ):
+        self.parent = parent
+        self.messages = messages or []
+        self.reward = reward
+        self.children = children or set()
+        self.weight = weight
+        self.model = model
+        self.fork = fork
+        self._cached_values: dict[tuple[Optional[str], Optional[bool]], float] = {}
+        for child in self.children:
+            if child.parent is not self:
+                raise ValueError("Child completion's parent must be this completion.")
 
     def commit(self, reward: Optional[float] = None) -> None:
         """
@@ -438,6 +451,9 @@ class Completion(BaseModel):
     def _num_token_logprobs(self) -> int:
         return sum(len(sequence) for sequence in self._token_logprob_sequences())
 
+    def __eq__(self, other: object) -> bool:
+        return self is other
+
     def __hash__(self) -> int:
         return id(self)
 
@@ -474,15 +490,6 @@ class Completion(BaseModel):
                     )
                 html += content
         return html.strip()
-
-    @model_validator(mode="after")
-    def validate_children(self) -> Self:
-        for child in self.children:
-            if child.parent is None:
-                child.parent = self
-            elif child.parent is not self:
-                raise ValueError("Child completion's parent must be this completion.")
-        return self
 
 
 def message_param(

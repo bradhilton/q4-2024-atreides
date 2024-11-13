@@ -21,11 +21,11 @@ class CompletionSampler:
     def __init__(
         self,
         client: AsyncOpenAI,
-        max_parallel_requests: int = 2**31 - 1,
+        max_concurrent_requests: int = 2**31 - 1,
         **kwargs: Unpack[Kwargs],
     ) -> None:
         self.client = client
-        self.semaphore = asyncio.Semaphore(max_parallel_requests)
+        self.semaphore = asyncio.Semaphore(max_concurrent_requests)
         self.kwargs = kwargs
         self.model = kwargs.get("model")
 
