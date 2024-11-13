@@ -34,6 +34,63 @@ from tqdm import tqdm
 log = utils.get_logger("DEBUG")
 
 
+class OptimizerConfig(DictConfig):
+    def __init__(self, _component_: str, *, fused: Optional[bool]) -> None:
+        super().__init__({})
+        self._component_ = _component_
+        self.fused = fused
+
+
+class CheckpointerConfig(DictConfig):
+    def __init__(self, _component_: str, *, model_type: str, output_dir: str) -> None:
+        super().__init__({})
+        self._component_ = _component_
+        self.model_type = model_type
+        self.output_dir = output_dir
+
+
+class FullFinetuneConfig(DictConfig):
+    def __init__(
+        self,
+        *,
+        device: Optional[Union[str, torch.device]],
+        dtype: Optional[Union[str, torch.dtype]],
+        optimizer: OptimizerConfig,
+        output_dir: str,
+        resume_from_checkpoint: bool,
+        gradient_accumulation_steps: int,
+        checkpointer: CheckpointerConfig,
+        seed: int,
+        epochs: int,
+        max_steps_per_epoch: Optional[int],
+        fsdp_cpu_offload: Optional[bool] = None,
+        log_every_n_steps: Optional[int] = None,
+        log_peak_memory_stats: Optional[bool] = None,
+        optimizer_in_bwd: Optional[bool] = None,
+        clip_grad_norm: Optional[Union[str, float]] = None,
+        enable_activation_checkpointing: Optional[bool] = None,
+        enable_activation_offloading: Optional[bool] = None,
+    ) -> None:
+        super().__init__({})
+        self.device = device
+        self.dtype = dtype
+        self.optimizer = optimizer
+        self.output_dir = output_dir
+        self.resume_from_checkpoint = resume_from_checkpoint
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.checkpointer = checkpointer
+        self.seed = seed
+        self.epochs = epochs
+        self.max_steps_per_epoch = max_steps_per_epoch
+        self.fsdp_cpu_offload = fsdp_cpu_offload
+        self.log_every_n_steps = log_every_n_steps
+        self.log_peak_memory_stats = log_peak_memory_stats
+        self.optimizer_in_bwd = optimizer_in_bwd
+        self.clip_grad_norm = clip_grad_norm
+        self.enable_activation_checkpointing = enable_activation_checkpointing
+        self.enable_activation_offloading = enable_activation_offloading
+
+
 class FullFinetuneRecipe(FTRecipeInterface):
     """
     Full finetuning recipe for dense transformer-based LLMs such as Llama2. This recipe supports
@@ -114,9 +171,17 @@ class FullFinetuneRecipe(FTRecipeInterface):
         RuntimeError: If ``enable_activation_offloading`` is True and ``enable_activation_checkpointing`` is False.
     """
 
-    def __init__(self, cfg: DictConfig) -> None:
-        self._device = utils.get_device(device=cfg.device)
-        self._dtype = training.get_dtype(cfg.dtype, device=self._device)
+    def __init__(self, cfg: FullFinetuneConfig) -> None:
+        self._device = (
+            cfg.device
+            if isinstance(cfg.device, torch.device)
+            else utils.get_device(device=cfg.device)
+        )
+        self._dtype = (
+            cfg.dtype
+            if isinstance(cfg.dtype, torch.dtype)
+            else training.get_dtype(cfg.dtype, device=self._device)
+        )
 
         if self._dtype == torch.float16:
             raise ValueError(
@@ -201,7 +266,7 @@ class FullFinetuneRecipe(FTRecipeInterface):
         self.max_steps_per_epoch = cfg.max_steps_per_epoch
         self.global_step = 0
 
-    def load_checkpoint(self, cfg_checkpointer: DictConfig) -> Dict[str, Any]:
+    def load_checkpoint(self, cfg_checkpointer: CheckpointerConfig) -> Dict[str, Any]:
         """
         Extract the checkpoint state from file and validate. If resume_from_checkpoint
         is True, this also includes the recipe state.
@@ -898,8 +963,8 @@ class FullFinetuneRecipe(FTRecipeInterface):
             destroy_process_group()
 
 
-@config.parse
-def recipe_main(cfg: DictConfig) -> None:
+@config.parse  # type: ignore
+def recipe_main(cfg: FullFinetuneConfig) -> None:
     """
     Entry point for the recipe.
 

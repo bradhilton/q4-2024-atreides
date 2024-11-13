@@ -35,4 +35,4 @@ dev-dependencies = [
 ]
 
 [tool.uv.sources]
-torchtune = { git = "https://github.com/pytorch/torchtune", tag = "v0.4.0-rc2" }
+torchtune = { git = "https://github.com/pytorch/torchtune", rev = "4b6877a6ef31a1f987c27594eaf8fe467b5ab785" }
