@@ -103,6 +103,7 @@ class FullFinetuneConfig(DictConfig):
         checkpointer: ComponentConfig[Checkpointer],
         seed: Optional[int],
         epochs: int,
+        max_steps_per_epoch: Optional[int],
         metric_logger: ComponentConfig[MetricLoggerInterface],
         model: ComponentConfig[TransformerDecoder],
         tokenizer: ComponentConfig[Tokenizer],
@@ -110,7 +111,6 @@ class FullFinetuneConfig(DictConfig):
         dataset: Union[ListConfig, ComponentConfig[Dataset]],
         shuffle: bool,
         batch_size: int,
-        max_steps_per_epoch: Optional[int] = None,
         fsdp_cpu_offload: Optional[bool] = None,
         log_every_n_steps: Optional[int] = None,
         log_peak_memory_stats: Optional[bool] = None,
@@ -136,6 +136,7 @@ class FullFinetuneConfig(DictConfig):
         self.checkpointer = checkpointer
         self.seed = seed
         self.epochs = epochs
+        self.max_steps_per_epoch = max_steps_per_epoch
         self.metric_logger = metric_logger
         self.model = model
         self.tokenizer = tokenizer
@@ -143,8 +144,6 @@ class FullFinetuneConfig(DictConfig):
         self.dataset = dataset
         self.shuffle = shuffle
         self.batch_size = batch_size
-        if max_steps_per_epoch is not None:
-            self.max_steps_per_epoch = max_steps_per_epoch
         if fsdp_cpu_offload is not None:
             self.fsdp_cpu_offload = fsdp_cpu_offload
         if log_every_n_steps is not None:
