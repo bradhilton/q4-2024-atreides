@@ -8,7 +8,20 @@ import sys
 import time
 
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generic,
+    List,
+    Optional,
+    overload,
+    ParamSpec,
+    Protocol,
+    Tuple,
+    TypeVar,
+    Union,
+)
 from warnings import warn
 
 import torch
@@ -19,34 +32,62 @@ from torch.distributed import destroy_process_group, init_process_group
 import torch.distributed
 
 from torch.optim.optimizer import Optimizer
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from torchtune import config, modules, training, utils
 from torchtune.config._utils import _get_component_from_path
 from torchtune.data import padded_collate_packed
 from torchtune.datasets import ConcatDataset
+from torchtune.modules import TransformerDecoder
+from torchtune.modules.tokenizers import ModelTokenizer
 from torchtune.recipe_interfaces import FTRecipeInterface
 from torchtune.training import DummyProfiler, PROFILER_KEY
 from torchtune.training.activations import apply_selective_activation_checkpointing
+from torchtune.training.checkpointing import Checkpointer
 from torchtune.training.lr_schedulers import get_lr
+from torchtune.training.metric_logging import MetricLoggerInterface
 
 from tqdm import tqdm
 
 log = utils.get_logger("DEBUG")
 
+T = TypeVar("T", covariant=True)
+P = ParamSpec("P")
 
-class OptimizerConfig(DictConfig):
-    def __init__(self, _component_: str, *, fused: Optional[bool]) -> None:
+
+class Tokenizer(ModelTokenizer, Protocol):
+    pad_id: int
+
+
+class ComponentConfig(DictConfig, Generic[T]):
+    @overload
+    def __init__(
+        self,
+        _component_: Callable[P, T],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> None: ...
+
+    @overload
+    def __init__(self, _component_: str, *args: Any, **kwargs: Any) -> None: ...
+
+    def __init__(
+        self, _component_: Union[Callable, str], *args: Any, **kwargs: Any
+    ) -> None:
         super().__init__({})
-        self._component_ = _component_
-        self.fused = fused
+        self._component_ = (
+            _component_
+            if isinstance(_component_, str)
+            else f"{_component_.__module__}.{_component_.__name__}"
+        )
+        if args:
+            raise ValueError(
+                "Positional arguments are not supported in ComponentConfig"
+            )
+        self.update(kwargs)
 
 
-class CheckpointerConfig(DictConfig):
-    def __init__(self, _component_: str, *, model_type: str, output_dir: str) -> None:
-        super().__init__({})
-        self._component_ = _component_
-        self.model_type = model_type
-        self.output_dir = output_dir
+def instantiate_component(cfg: ComponentConfig[T], *args: Any, **kwargs: Any) -> T:
+    return config.instantiate(cfg, *args, **kwargs)
 
 
 class FullFinetuneConfig(DictConfig):
@@ -55,14 +96,21 @@ class FullFinetuneConfig(DictConfig):
         *,
         device: Optional[Union[str, torch.device]],
         dtype: Optional[Union[str, torch.dtype]],
-        optimizer: OptimizerConfig,
+        optimizer: ComponentConfig[Optimizer],
         output_dir: str,
         resume_from_checkpoint: bool,
         gradient_accumulation_steps: int,
-        checkpointer: CheckpointerConfig,
-        seed: int,
+        checkpointer: ComponentConfig[Checkpointer],
+        seed: Optional[int],
         epochs: int,
-        max_steps_per_epoch: Optional[int],
+        metric_logger: ComponentConfig[MetricLoggerInterface],
+        model: ComponentConfig[TransformerDecoder],
+        tokenizer: ComponentConfig[Tokenizer],
+        loss: ComponentConfig[nn.Module],
+        dataset: Union[ListConfig, ComponentConfig[Dataset]],
+        shuffle: bool,
+        batch_size: int,
+        max_steps_per_epoch: Optional[int] = None,
         fsdp_cpu_offload: Optional[bool] = None,
         log_every_n_steps: Optional[int] = None,
         log_peak_memory_stats: Optional[bool] = None,
@@ -70,6 +118,13 @@ class FullFinetuneConfig(DictConfig):
         clip_grad_norm: Optional[Union[str, float]] = None,
         enable_activation_checkpointing: Optional[bool] = None,
         enable_activation_offloading: Optional[bool] = None,
+        compile: Optional[bool] = None,
+        custom_sharded_layers: Optional[List[str]] = None,
+        fsdp_reshard_after_forward: Optional[bool] = None,
+        ac_mode: Optional[str] = None,
+        ac_option: Optional[int] = None,
+        collate_fn: Optional[str] = None,
+        profiler: Optional[ComponentConfig] = None,
     ) -> None:
         super().__init__({})
         self.device = device
@@ -81,14 +136,43 @@ class FullFinetuneConfig(DictConfig):
         self.checkpointer = checkpointer
         self.seed = seed
         self.epochs = epochs
-        self.max_steps_per_epoch = max_steps_per_epoch
-        self.fsdp_cpu_offload = fsdp_cpu_offload
-        self.log_every_n_steps = log_every_n_steps
-        self.log_peak_memory_stats = log_peak_memory_stats
-        self.optimizer_in_bwd = optimizer_in_bwd
-        self.clip_grad_norm = clip_grad_norm
-        self.enable_activation_checkpointing = enable_activation_checkpointing
-        self.enable_activation_offloading = enable_activation_offloading
+        self.metric_logger = metric_logger
+        self.model = model
+        self.tokenizer = tokenizer
+        self.loss = loss
+        self.dataset = dataset
+        self.shuffle = shuffle
+        self.batch_size = batch_size
+        if max_steps_per_epoch is not None:
+            self.max_steps_per_epoch = max_steps_per_epoch
+        if fsdp_cpu_offload is not None:
+            self.fsdp_cpu_offload = fsdp_cpu_offload
+        if log_every_n_steps is not None:
+            self.log_every_n_steps = log_every_n_steps
+        if log_peak_memory_stats is not None:
+            self.log_peak_memory_stats = log_peak_memory_stats
+        if optimizer_in_bwd is not None:
+            self.optimizer_in_bwd = optimizer_in_bwd
+        if clip_grad_norm is not None:
+            self.clip_grad_norm = clip_grad_norm
+        if enable_activation_checkpointing is not None:
+            self.enable_activation_checkpointing = enable_activation_checkpointing
+        if enable_activation_offloading is not None:
+            self.enable_activation_offloading = enable_activation_offloading
+        if compile is not None:
+            self.compile = compile
+        if custom_sharded_layers is not None:
+            self.custom_sharded_layers = custom_sharded_layers
+        if fsdp_reshard_after_forward is not None:
+            self.fsdp_reshard_after_forward = fsdp_reshard_after_forward
+        if ac_mode is not None:
+            self.ac_mode = ac_mode
+        if ac_option is not None:
+            self.ac_option = ac_option
+        if collate_fn is not None:
+            self.collate_fn = collate_fn
+        if profiler is not None:
+            self.profiler = profiler
 
 
 class FullFinetuneRecipe(FTRecipeInterface):
@@ -199,8 +283,8 @@ class FullFinetuneRecipe(FTRecipeInterface):
 
         # logging attributes
         self._output_dir = cfg.output_dir
-        self._log_every_n_steps = cfg.get("log_every_n_steps", 1)
-        self._log_peak_memory_stats = cfg.get("log_peak_memory_stats", False)
+        self._log_every_n_steps: int = cfg.get("log_every_n_steps", 1)
+        self._log_peak_memory_stats: bool = cfg.get("log_peak_memory_stats", False)
 
         if self._log_peak_memory_stats and self._device.type != "cuda":
             log.info(
@@ -216,8 +300,10 @@ class FullFinetuneRecipe(FTRecipeInterface):
         # Training cfg
         self._resume_from_checkpoint = cfg.resume_from_checkpoint
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
-        self._optimizer_in_bwd = cfg.get("optimizer_in_bwd", False)
-        self._clip_grad_norm = cfg.get("clip_grad_norm", None)
+        self._optimizer_in_bwd: bool = cfg.get("optimizer_in_bwd", False)
+        self._clip_grad_norm: Optional[Union[str, float]] = cfg.get(
+            "clip_grad_norm", None
+        )
 
         # Optimizer in backward is not compatible with gradient accumulation or gradient clipping
         if self._optimizer_in_bwd:
@@ -233,10 +319,10 @@ class FullFinetuneRecipe(FTRecipeInterface):
                 )
 
         # activation checkpointing/offloading
-        self._enable_activation_checkpointing = cfg.get(
+        self._enable_activation_checkpointing: bool = cfg.get(
             "enable_activation_checkpointing", False
         )
-        self._enable_activation_offloading = cfg.get(
+        self._enable_activation_offloading: bool = cfg.get(
             "enable_activation_offloading", False
         )
         if self._enable_activation_offloading:
@@ -250,7 +336,8 @@ class FullFinetuneRecipe(FTRecipeInterface):
                 )
         elif (
             self._enable_activation_checkpointing
-            and cfg.checkpointer.model_type != "LLAMA3_VISION"
+            and cfg.checkpointer.model_type  # TODO: `model_type` type is not defined
+            != "LLAMA3_VISION"
         ):
             utils.log_rank_zero(
                 log,
@@ -266,12 +353,14 @@ class FullFinetuneRecipe(FTRecipeInterface):
         self.max_steps_per_epoch = cfg.max_steps_per_epoch
         self.global_step = 0
 
-    def load_checkpoint(self, cfg_checkpointer: CheckpointerConfig) -> Dict[str, Any]:
+    def load_checkpoint(
+        self, cfg_checkpointer: ComponentConfig[Checkpointer]
+    ) -> Dict[str, Any]:
         """
         Extract the checkpoint state from file and validate. If resume_from_checkpoint
         is True, this also includes the recipe state.
         """
-        self._checkpointer = config.instantiate(
+        self._checkpointer = instantiate_component(
             cfg_checkpointer,
             resume_from_checkpoint=self._resume_from_checkpoint,
         )
@@ -321,20 +410,20 @@ class FullFinetuneRecipe(FTRecipeInterface):
                 "Are you sure you passed in the right recipe checkpoint?"
             ) from e
 
-    def setup(self, cfg: DictConfig) -> None:
+    def setup(self, cfg: FullFinetuneConfig) -> None:
         """
         Setup the recipe. This includes training state (if resume_from_checkpoint is True),
         model, tokenizer, loss, optimizer, sampler, and dataloader.
         """
         if self._is_rank_zero:
-            self._metric_logger = config.instantiate(cfg.metric_logger)
+            self._metric_logger = instantiate_component(cfg.metric_logger)
 
             # log config with parameter override
             self._metric_logger.log_config(cfg)
 
         checkpoint_dict = self.load_checkpoint(cfg_checkpointer=cfg.checkpointer)
 
-        self._compile = cfg.get("compile", False)
+        self._compile: bool = cfg.get("compile", False)
         self._model = self._setup_model(
             cfg_model=cfg.model,
             enable_activation_checkpointing=self._enable_activation_checkpointing,
@@ -346,7 +435,7 @@ class FullFinetuneRecipe(FTRecipeInterface):
             ac_mode=cfg.get("ac_mode", None),
             ac_option=cfg.get("ac_option", None),
         )
-        self._tokenizer = config.instantiate(cfg.tokenizer)
+        self._tokenizer = instantiate_component(cfg.tokenizer)
 
         self._optimizer = self._setup_optimizer(
             cfg_optimizer=cfg.optimizer,
@@ -359,21 +448,23 @@ class FullFinetuneRecipe(FTRecipeInterface):
         )
 
         # initialize loss
-        self._loss_fn = config.instantiate(cfg.loss)
+        self._loss_fn = instantiate_component(cfg.loss)
 
         if self._compile:
             training.compile_loss(self._loss_fn, verbose=self._is_rank_zero)
 
         if self._loss_fn.__class__.__name__ == "CEWithChunkedOutputLoss":
             # set num_output_chunks for model
-            self._model.set_num_output_chunks(self._loss_fn.num_output_chunks)
+            self._model.set_num_output_chunks(
+                self._loss_fn.num_output_chunks  # TODO: `num_output_chunks` type is not defined
+            )
 
         if self._is_rank_zero:
             log.info("Loss is initialized.")
 
         # sampler and dataloader depend on the tokenizer and loss_fn and should be
         # setup after both of these are initialized
-        collate_name = cfg.get("collate_fn", "torchtune.data.padded_collate_sft")
+        collate_name: str = cfg.get("collate_fn", "torchtune.data.padded_collate_sft")
         self._sampler, self._dataloader = self._setup_data(
             cfg_dataset=cfg.dataset,
             shuffle=cfg.shuffle,
@@ -476,7 +567,7 @@ class FullFinetuneRecipe(FTRecipeInterface):
 
     def _setup_model(
         self,
-        cfg_model: DictConfig,
+        cfg_model: ComponentConfig[TransformerDecoder],
         enable_activation_checkpointing: bool,
         enable_activation_offloading: bool,
         fsdp_cpu_offload: bool,
@@ -485,7 +576,7 @@ class FullFinetuneRecipe(FTRecipeInterface):
         custom_sharded_layers: Optional[List[str]] = None,
         ac_mode: Optional[str] = None,
         ac_option: Optional[int] = None,
-    ) -> nn.Module:
+    ) -> TransformerDecoder:
         """
         Model initialization has some important considerations:
            a. To minimize GPU peak memory, we initialize the model on meta device with
@@ -504,7 +595,7 @@ class FullFinetuneRecipe(FTRecipeInterface):
             training.set_default_dtype(self._dtype),
             torch.device("meta") if training.is_distributed() else self._device,
         ):
-            model = config.instantiate(cfg_model)
+            model = instantiate_component(cfg_model)
 
         if self._compile:
             training.compile_model(model, verbose=self._is_rank_zero)
@@ -590,14 +681,14 @@ class FullFinetuneRecipe(FTRecipeInterface):
 
     def _setup_optimizer(
         self,
-        cfg_optimizer: DictConfig,
+        cfg_optimizer: ComponentConfig[Optimizer],
         optimizer_in_bwd: bool = False,
         opt_state_dict: Optional[Dict[str, Any]] = None,
     ) -> Optional[Optimizer]:
         if optimizer_in_bwd:
             # Maintain a dict of optims for every parameter.
             optim_dict = {
-                param: config.instantiate(cfg_optimizer, [param])
+                param: instantiate_component(cfg_optimizer, params=[param])
                 for param in self._model.parameters()
             }
 
@@ -629,7 +720,9 @@ class FullFinetuneRecipe(FTRecipeInterface):
                 log.info("In-backward optimizers are set up.")
             return None
         else:
-            optimizer = config.instantiate(cfg_optimizer, self._model.parameters())
+            optimizer = instantiate_component(
+                cfg_optimizer, params=self._model.parameters()
+            )
             if opt_state_dict:
                 training.load_from_full_optimizer_state_dict(
                     optimizer,
@@ -643,7 +736,7 @@ class FullFinetuneRecipe(FTRecipeInterface):
 
     def _setup_data(
         self,
-        cfg_dataset: Union[ListConfig, DictConfig],
+        cfg_dataset: Union[ListConfig, ComponentConfig[Dataset]],
         shuffle: bool,
         batch_size: int,
         collate_fn: str,
@@ -663,7 +756,7 @@ class FullFinetuneRecipe(FTRecipeInterface):
             ds = ConcatDataset(datasets=datasets)
             packed = False
         else:
-            ds = config.instantiate(cfg_dataset, self._tokenizer)
+            ds = instantiate_component(cfg_dataset, tokenizer=self._tokenizer)
             packed = cfg_dataset.get("packed", False)
 
         # Instantiate collate_fn
@@ -683,8 +776,8 @@ class FullFinetuneRecipe(FTRecipeInterface):
             collate_fn=(
                 partial(
                     _collate_fn,
-                    padding_idx=self._tokenizer.pad_id,
-                    ignore_idx=self._loss_fn.ignore_index,
+                    padding_idx=self._tokenizer.pad_id,  # TODO: `pad_id` type is not defined
+                    ignore_idx=self._loss_fn.ignore_index,  # TODO: `ignore_index` type is not defined
                 )
                 if not packed
                 else padded_collate_packed
@@ -784,7 +877,8 @@ class FullFinetuneRecipe(FTRecipeInterface):
             )
             log.info(f"Saving checkpoint took {time.perf_counter() - start:.2f} secs")
 
-        torch.distributed.barrier()
+        if training.is_distributed():
+            torch.distributed.barrier()
 
     def train(self) -> None:
         """
@@ -963,7 +1057,6 @@ class FullFinetuneRecipe(FTRecipeInterface):
             destroy_process_group()
 
 
-@config.parse  # type: ignore
 def recipe_main(cfg: FullFinetuneConfig) -> None:
     """
     Entry point for the recipe.
@@ -993,4 +1086,4 @@ def recipe_main(cfg: FullFinetuneConfig) -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(recipe_main())
+    sys.exit(config.parse(recipe_main)())  # type: ignore
