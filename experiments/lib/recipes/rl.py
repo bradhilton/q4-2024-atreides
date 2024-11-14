@@ -181,55 +181,32 @@ class TypedDataLoader(DataLoader[T]):
         return super().__iter__()
 
 
-def create_packed_causal_mask(
-    tokens: torch.Tensor, *, bos_id: int, use_cumsum: bool = True
-) -> torch.Tensor:
+def create_packed_causal_mask(tokens: torch.Tensor, *, bos_id: int) -> torch.Tensor:
     """
     Creates a causal attention mask for packed sequences, where each sequence starts with a BOS token.
 
     Args:
         tokens: Input tensor of shape [b x s] containing token ids
-        bos_id: Token ID used to mark the start of sequences.
-        use_cumsum: If True, uses cumsum method, otherwise uses explicit boundary method (default: True)
+        bos_token_id: Token ID used to mark the start of sequences.
 
     Returns:
         Boolean tensor of shape [b x s x s] where True means position i can attend to position j
     """
     _, seq_len = tokens.shape
 
-    if use_cumsum:
-        # Compute causal mask
-        causal_mask = torch.tril(
-            torch.ones(seq_len, seq_len, dtype=torch.bool, device=tokens.device)
-        )
+    # Compute causal mask
+    causal_mask = torch.tril(
+        torch.ones(seq_len, seq_len, dtype=torch.bool, device=tokens.device)
+    )
 
-        # Compute sequence IDs by cumulative sum of BOS tokens
-        seq_ids = torch.cumsum(tokens == bos_id, dim=-1)
+    # Compute sequence IDs by cumulative sum of BOS tokens
+    seq_ids = torch.cumsum(tokens == bos_id, dim=-1)
 
-        # Determine if positions are in the same sequence
-        same_sequence = seq_ids.unsqueeze(-1) == seq_ids.unsqueeze(-2)
+    # Determine if positions are in the same sequence
+    same_sequence = seq_ids.unsqueeze(-1) == seq_ids.unsqueeze(-2)
 
-        # Apply sequence boundary masking
-        causal_mask = causal_mask & same_sequence
-    else:
-        # Get indices where tokens == BOS to find sequence boundaries
-        is_bos = tokens == bos_id
-        seq_starts = torch.where(is_bos)[1]  # [1] since we want column indices
-        seq_ends = torch.cat(
-            [seq_starts[1:], torch.tensor([seq_len], device=tokens.device)]
-        )
-
-        # Create base causal mask - ~triu makes True mean "can attend"
-        causal_mask = ~torch.triu(
-            torch.ones(seq_len, seq_len, dtype=torch.bool, device=tokens.device),
-            diagonal=1,
-        )
-
-        # Add sequence boundary masking
-        for start, end in zip(seq_starts, seq_ends):
-            # Mask out attention to tokens outside current sequence
-            causal_mask[start:end, end:] = False  # Mask future sequences
-            causal_mask[start:end, :start] = False  # Mask previous sequences
+    # Apply sequence boundary masking
+    causal_mask = causal_mask & same_sequence
 
     return causal_mask
 
