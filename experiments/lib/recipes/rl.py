@@ -7,7 +7,6 @@
 import sys
 import time
 
-import copy
 from functools import partial
 from typing import (
     Any,
@@ -76,7 +75,7 @@ class ComponentConfig(DictConfig, Generic[T]):
     def __init__(
         self, _component_: Union[Callable, str], *args: Any, **kwargs: Any
     ) -> None:
-        super().__init__({})
+        super().__init__({}, flags={"allow_objects": True})
         self._component_ = _component_
         if args:
             raise ValueError(
@@ -792,7 +791,7 @@ class RLRecipe(FTRecipeInterface):
         """
         world_size, rank = training.get_world_size_and_rank()
 
-        ds = instantiate_component(cfg_dataset, tokenizer=self._tokenizer)
+        ds = instantiate_component(cfg_dataset)
         packed = cfg_dataset.get("packed", False)
 
         # Instantiate collate_fn
@@ -809,15 +808,15 @@ class RLRecipe(FTRecipeInterface):
             sampler=sampler,
             # dropping last avoids shape issues with compile + flex attention
             drop_last=True,
-            collate_fn=(
-                partial(
-                    _collate_fn,
-                    padding_idx=self._tokenizer.pad_id,  # TODO: `pad_id` type is not defined
-                    ignore_idx=self._loss_fn.ignore_index,  # TODO: `ignore_index` type is not defined
-                )
-                if not packed
-                else padded_collate_packed
-            ),
+            # collate_fn=(
+            #     partial(
+            #         _collate_fn,
+            #         padding_idx=self._tokenizer.pad_id,  # TODO: `pad_id` type is not defined
+            #         ignore_idx=self._loss_fn.ignore_index,  # TODO: `ignore_index` type is not defined
+            #     )
+            #     if not packed
+            #     else padded_collate_packed
+            # ),
         )
 
         if self._is_rank_zero:
@@ -852,10 +851,14 @@ class RLRecipe(FTRecipeInterface):
 
         # To prevent GPU memory from spiking during checkpoint save,
         # we consolidate the full model and optim state dicts on CPU for rank 0
-        cpu_state_dict = training.gather_cpu_state_dict(
-            self._model.state_dict(),
-            self._is_rank_zero,
-            device=self._device,
+        model_state_dict = (
+            training.gather_cpu_state_dict(
+                self._model.state_dict(),
+                self._is_rank_zero,
+                device=self._device,
+            )
+            if training.is_distributed()
+            else self._model.state_dict()
         )
 
         if self._is_rank_zero:
@@ -868,16 +871,24 @@ class RLRecipe(FTRecipeInterface):
             if self._is_rank_zero:
                 log.info("Getting optimizer state dict...")
             if self._optimizer:
-                opt_state_dict = training.get_full_optimizer_state_dict(
-                    self._optimizer,
-                    self._is_rank_zero,
-                    device=self._device,
+                opt_state_dict = (
+                    training.get_full_optimizer_state_dict(
+                        self._optimizer,
+                        self._is_rank_zero,
+                        device=self._device,
+                    )
+                    if training.is_distributed()
+                    else self._optimizer.state_dict()
                 )
             else:
                 opt_state_dict = {}
                 for param, opt in self._optim_ckpt_wrapper.optim_map.items():
-                    opt_state_dict[param] = training.get_full_optimizer_state_dict(
-                        opt, self._is_rank_zero, device=self._device
+                    opt_state_dict[param] = (
+                        training.get_full_optimizer_state_dict(
+                            opt, self._is_rank_zero, device=self._device
+                        )
+                        if training.is_distributed()
+                        else opt.state_dict()
                     )
             if self._is_rank_zero:
                 log.info(
@@ -891,7 +902,7 @@ class RLRecipe(FTRecipeInterface):
 
         if self._is_rank_zero:
             start = time.perf_counter()
-            checkpoint_dict.update({training.MODEL_KEY: cpu_state_dict})
+            checkpoint_dict.update({training.MODEL_KEY: model_state_dict})
 
             # if training is in-progress, checkpoint the optimizer state and recipe state
             # as well.
@@ -962,13 +973,15 @@ class RLRecipe(FTRecipeInterface):
                 ):
                     torch.cuda.memory._record_memory_history()
 
-                utils.batch_to_device(dict(batch), self._device)
+                utils.batch_to_device(batch, self._device)  # type: ignore - `batch_to_device` expects a `dict`, not a `TypedDict`, but this should be fine
 
                 # Assuming the first token in the batch is the bos token
                 bos_id = int(batch["tokens"][0, 0].item())
+                mask = create_packed_causal_mask(batch["tokens"], bos_id=bos_id)
+                input_pos = get_input_pos(batch["tokens"], bos_id=bos_id)
 
                 with self.activations_handling_ctx:
-                    logits = self._model(
+                    logits = self._model.forward(
                         tokens=batch["tokens"],
                         mask=create_packed_causal_mask(batch["tokens"], bos_id=bos_id),
                         input_pos=get_input_pos(batch["tokens"], bos_id=bos_id),

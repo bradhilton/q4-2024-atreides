@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Literal, Optional, Union
+from typing import Optional, Union
 
 
 from .running_normalizer import DeviationType, RunningNormalizer
@@ -76,7 +76,7 @@ class PPOLoss(nn.Module):
         advantages: torch.Tensor,
         logprobs: torch.Tensor,
         bos_id: Optional[int] = None,
-    ) -> tuple[float, int]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Computes the PPO loss for sequence data.
 
@@ -105,13 +105,19 @@ class PPOLoss(nn.Module):
             total_loss (Tensor):
                 Scalar tensor representing the combined PPO loss.
 
-            num_tokens (int):
-                Number of tokens used to compute the loss.
+            num_tokens (Tensor):
+                Scalar tensor representing the number of valid tokens used to compute the loss.
         """
         if bos_id is None:
             bos_id = int(tokens.view(-1)[0].item())
         # Flatten logits tensor to shape (batch_size * sequence_length, vocab_size)
         logits = logits.view(-1, logits.size(-1))
+        # Debugging
+        if True:
+            ce_loss = nn.functional.cross_entropy(
+                logits, tokens.view(-1), ignore_index=bos_id
+            )
+            print(f"ce_loss: {ce_loss}")
         # Shape: (batch_size * sequence_length,)
         tokens = shift(tokens, ignore_label=bos_id).view(-1)
         # Shape: (batch_size * sequence_length,)
@@ -131,7 +137,7 @@ class PPOLoss(nn.Module):
         # Create mask where advantages and logprobs are not NaN
         # Shape: (batch_size * sequence_length,)
         mask = ~torch.isnan(advantages) & ~torch.isnan(logprobs)
-        num_tokens = int(mask.sum().item())
+        num_tokens = mask.sum()
 
         # Apply mask
         new_logprobs = new_logprobs[mask]  # Shape: (num_tokens,)

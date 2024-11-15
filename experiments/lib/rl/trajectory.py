@@ -144,17 +144,17 @@ def write_trajectory_batch(
                 advantage
                 for trajectory in selected_trajectories
                 for advantage in trajectory.terminus.all_token_advantages()
-            )[:mask_size]
+            )  # [:mask_size]
         )
         tensors["logprobs"][row] = torch.full_like(
             mask, fill_value=torch.nan, dtype=torch.float32
         )
         tensors["logprobs"][row][mask] = torch.tensor(
             list(
-                advantage
+                logprob
                 for trajectory in selected_trajectories
-                for advantage in trajectory.terminus.all_logprobs()
-            )[:mask_size]
+                for logprob in trajectory.terminus.all_logprobs()
+            )  # [:mask_size]
         )
 
 

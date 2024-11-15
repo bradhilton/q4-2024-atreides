@@ -938,7 +938,7 @@ class FullFinetuneRecipe(FTRecipeInterface):
                 labels = batch.pop("labels")
 
                 with self.activations_handling_ctx:
-                    logits = self._model(**batch)
+                    logits = self._model.forward(**batch)
 
                 # Shift labels to compute loss
                 # equivalent to doing labels[..., 1:] and logits[..., :-1, :]
