@@ -977,8 +977,6 @@ class RLRecipe(FTRecipeInterface):
 
                 # Assuming the first token in the batch is the bos token
                 bos_id = int(batch["tokens"][0, 0].item())
-                mask = create_packed_causal_mask(batch["tokens"], bos_id=bos_id)
-                input_pos = get_input_pos(batch["tokens"], bos_id=bos_id)
 
                 with self.activations_handling_ctx:
                     logits = self._model.forward(

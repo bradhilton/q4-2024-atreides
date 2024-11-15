@@ -498,6 +498,7 @@ def message_param(
 ) -> ChatCompletionAssistantMessageParam:
     message = choice.message
     if replacement_token and choice.logprobs:
+        message = message.model_copy()
         replacement = replacement_token
         if choice.logprobs.content:
             message.content = replacement * len(choice.logprobs.content)

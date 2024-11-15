@@ -112,12 +112,6 @@ class PPOLoss(nn.Module):
             bos_id = int(tokens.view(-1)[0].item())
         # Flatten logits tensor to shape (batch_size * sequence_length, vocab_size)
         logits = logits.view(-1, logits.size(-1))
-        # Debugging
-        if True:
-            ce_loss = nn.functional.cross_entropy(
-                logits, tokens.view(-1), ignore_index=bos_id
-            )
-            print(f"ce_loss: {ce_loss}")
         # Shape: (batch_size * sequence_length,)
         tokens = shift(tokens, ignore_label=bos_id).view(-1)
         # Shape: (batch_size * sequence_length,)

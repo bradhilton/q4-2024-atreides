@@ -57,7 +57,10 @@ class Tokenizer:
         def patch(
             prompts: list[dict[str, str]], *args: object, **kwargs: object
         ) -> list[list[int]]:
-            return [tokenizer.encode(prompt["prompt"]) for prompt in prompts]
+            return [
+                tokenizer.encode(prompt["prompt"].removeprefix("<|begin_of_text|>"))
+                for prompt in prompts
+            ]
 
         self.llm.generate = patch  # type: ignore
         token_ids: list[list[int]] = self.llm.chat(
