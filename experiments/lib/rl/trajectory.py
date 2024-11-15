@@ -89,22 +89,20 @@ async def get_trajectory_batch(
     return batch
 
 
-class TrajectoryBatchTensorDict(TypedDict):
+class TrajectoryTensors(TypedDict):
     tokens: torch.Tensor
     advantages: torch.Tensor
     logprobs: torch.Tensor
 
 
-def trajectory_batch_tensor_dict(
-    batch: list[list[Trajectory]], seqlen: int
-) -> TrajectoryBatchTensorDict:
+def trajectory_tensors(batch: list[list[Trajectory]], seqlen: int) -> TrajectoryTensors:
     tokenizer = batch[0][0].buffer.tokenizer
     tokens = torch.full(
         (len(batch), seqlen),
         tokenizer.get_pad_token_id() or 0,
         dtype=torch.int64,
     )
-    tensor_dict: TrajectoryBatchTensorDict = {
+    tensor_dict: TrajectoryTensors = {
         "tokens": tokens,
         "advantages": torch.full_like(
             tokens, fill_value=torch.nan, dtype=torch.float32
@@ -116,7 +114,7 @@ def trajectory_batch_tensor_dict(
 
 
 def write_trajectory_batch(
-    batch: list[list[Trajectory]], tensors: TrajectoryBatchTensorDict, start: int
+    batch: list[list[Trajectory]], tensors: TrajectoryTensors, start: int
 ) -> None:
     tokenizer = batch[0][0].buffer.tokenizer
     rows, seqlen = tensors["tokens"].shape
@@ -160,13 +158,13 @@ def write_trajectory_batch(
         )
 
 
-class Trajectories(BaseModel, Dataset[TrajectoryBatchTensorDict], frozen=True):
+class Trajectories(BaseModel, Dataset[TrajectoryTensors], frozen=True):
     dir: str
     rows: int
     seqlen: int
 
     @functools.cached_property
-    def tensors(self) -> TrajectoryBatchTensorDict:
+    def tensors(self) -> TrajectoryTensors:
         os.makedirs(self.dir, exist_ok=True)
         return {
             "tokens": torch.from_file(
@@ -192,7 +190,7 @@ class Trajectories(BaseModel, Dataset[TrajectoryBatchTensorDict], frozen=True):
     def __len__(self) -> int:
         return self.rows
 
-    def __getitem__(self, index: int) -> TrajectoryBatchTensorDict:
+    def __getitem__(self, index: int) -> TrajectoryTensors:
         return {
             "tokens": self.tensors["tokens"][index],
             "advantages": self.tensors["advantages"][index],
@@ -235,12 +233,12 @@ def serve_trajectory_batch_api(
 
 
 class IterableTrajectories(
-    Trajectories, IterableDataset[TrajectoryBatchTensorDict], frozen=True
+    Trajectories, IterableDataset[TrajectoryTensors], frozen=True
 ):
     batch_api_address: tuple[str, int] = ("127.0.0.1", 8000)
     buffer: int = 1
 
-    def __iter__(self) -> Iterable[TrajectoryBatchTensorDict]:
+    def __iter__(self) -> Iterable[TrajectoryTensors]:
         worker_info = get_worker_info()
         if worker_info:  # in a worker process
             # split workload

@@ -49,7 +49,7 @@ from torchtune.training.metric_logging import MetricLoggerInterface
 
 from tqdm import tqdm
 
-from ..rl.trajectory import TrajectoryBatchTensorDict
+from ..rl.trajectory import TrajectoryTensors
 
 log = utils.get_logger("DEBUG")
 
@@ -111,7 +111,7 @@ class RLConfig(DictConfig):
         model: ComponentConfig[TransformerDecoder],
         tokenizer: ComponentConfig[Tokenizer],
         loss: ComponentConfig[nn.Module],
-        dataset: ComponentConfig[Dataset[TrajectoryBatchTensorDict]],
+        dataset: ComponentConfig[Dataset[TrajectoryTensors]],
         shuffle: bool,
         batch_size: int,
         fsdp_cpu_offload: Optional[bool] = None,
@@ -780,11 +780,11 @@ class RLRecipe(FTRecipeInterface):
 
     def _setup_data(
         self,
-        cfg_dataset: ComponentConfig[Dataset[TrajectoryBatchTensorDict]],
+        cfg_dataset: ComponentConfig[Dataset[TrajectoryTensors]],
         shuffle: bool,
         batch_size: int,
         collate_fn: str,
-    ) -> Tuple[DistributedSampler, TypedDataLoader[TrajectoryBatchTensorDict]]:
+    ) -> Tuple[DistributedSampler, TypedDataLoader[TrajectoryTensors]]:
         """
         All data related setup happens here. Currently this recipe only supports the
         DistributedSamplers with Map-style Datasets which fit into memory. Other samplers,
@@ -964,14 +964,6 @@ class RLRecipe(FTRecipeInterface):
 
                 utils.batch_to_device(dict(batch), self._device)
 
-                # Shape [b, s], needed for the loss not the model
-                advantages = batch["advantages"]
-
-                # Calculate the number of unmasked tokens in the current batch
-                # and increment the total number of tokens seen in the step
-                current_num_tokens = (advantages != torch.nan).sum()
-                num_tokens += current_num_tokens
-
                 # Assuming the first token in the batch is the bos token
                 bos_id = int(batch["tokens"][0, 0].item())
 
@@ -982,31 +974,20 @@ class RLRecipe(FTRecipeInterface):
                         input_pos=get_input_pos(batch["tokens"], bos_id=bos_id),
                     )
 
-                # Shift labels to compute loss
-                # equivalent to doing labels[..., 1:] and logits[..., :-1, :]
-                # But this way we dont need to slice the logits. We just add an ignore index to labels.
-                advantages = torch.hstack(
-                    (
-                        advantages[..., 1:],
-                        self.ignore_advantages_cache[: advantages.shape[0]],
-                    )
-                )
-                if not isinstance(logits, list):
-                    advantages = advantages.reshape(-1)
-                    logits = logits.reshape(-1, logits.size(-1))
-
                 # Compute loss
-                # Loss is normalized by default so we multiply by the number of tokens
-                # This way we can normalize by the total number of tokens if we're accumulating gradients
-                current_loss = (
-                    self._loss_fn(logits, advantages, batch["logprobs"])
-                    * current_num_tokens
+                current_loss, current_num_tokens = self._loss_fn(
+                    logits,
+                    batch["tokens"],
+                    batch["advantages"],
+                    batch["logprobs"],
+                    bos_id=bos_id,
                 )
 
                 # free logits otherwise it peaks backward memory
                 del logits
 
                 running_loss += current_loss
+                num_tokens += current_num_tokens
 
                 # For optimizer in backward, we need to normalize before calling backward
                 # This case and gradient accumulation are mutually exclusive
