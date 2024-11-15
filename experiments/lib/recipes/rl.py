@@ -7,6 +7,7 @@
 import sys
 import time
 
+import copy
 from functools import partial
 from typing import (
     Any,
@@ -76,11 +77,7 @@ class ComponentConfig(DictConfig, Generic[T]):
         self, _component_: Union[Callable, str], *args: Any, **kwargs: Any
     ) -> None:
         super().__init__({})
-        self._component_ = (
-            _component_
-            if isinstance(_component_, str)
-            else f"{_component_.__module__}.{_component_.__name__}"
-        )
+        self._component_ = _component_
         if args:
             raise ValueError(
                 "Positional arguments are not supported in ComponentConfig"
@@ -89,7 +86,11 @@ class ComponentConfig(DictConfig, Generic[T]):
 
 
 def instantiate_component(cfg: ComponentConfig[T], *args: Any, **kwargs: Any) -> T:
-    return config.instantiate(cfg, *args, **kwargs)
+    if isinstance(cfg._component_, str):
+        return config.instantiate(cfg, *args, **kwargs)
+    _kwargs = {str(k): v for k, v in cfg.items() if k != "_component_"}
+    _kwargs.update(kwargs)
+    return cfg._component_(*args, **_kwargs)
 
 
 class RLConfig(DictConfig):
@@ -537,7 +538,7 @@ class RLRecipe(FTRecipeInterface):
         self._profiler = self._setup_profiler(cfg.get(PROFILER_KEY, None))
 
         # Used to ignore labels for loss computation
-        self.ignore_labels_cache = torch.full(
+        self.ignore_advantages_cache = torch.full(
             (cfg.batch_size, 1), torch.nan, device=self._device
         )
 
@@ -987,7 +988,7 @@ class RLRecipe(FTRecipeInterface):
                 advantages = torch.hstack(
                     (
                         advantages[..., 1:],
-                        self.ignore_labels_cache[: advantages.shape[0]],
+                        self.ignore_advantages_cache[: advantages.shape[0]],
                     )
                 )
                 if not isinstance(logits, list):
@@ -997,7 +998,10 @@ class RLRecipe(FTRecipeInterface):
                 # Compute loss
                 # Loss is normalized by default so we multiply by the number of tokens
                 # This way we can normalize by the total number of tokens if we're accumulating gradients
-                current_loss = self._loss_fn(logits, advantages) * current_num_tokens
+                current_loss = (
+                    self._loss_fn(logits, advantages, batch["logprobs"])
+                    * current_num_tokens
+                )
 
                 # free logits otherwise it peaks backward memory
                 del logits
