@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 import sys
 import time
 
@@ -48,6 +49,7 @@ from torchtune.training.metric_logging import MetricLoggerInterface
 
 from tqdm import tqdm
 
+from ..rl.ppo import PPOLoss, PPOResult
 from ..rl.trajectory import TrajectoryTensors
 
 log = utils.get_logger("DEBUG")
@@ -109,7 +111,7 @@ class RLConfig(DictConfig):
         metric_logger: ComponentConfig[MetricLoggerInterface],
         model: ComponentConfig[TransformerDecoder],
         tokenizer: ComponentConfig[Tokenizer],
-        loss: ComponentConfig[nn.Module],
+        loss: ComponentConfig[PPOLoss],
         dataset: ComponentConfig[Dataset[TrajectoryTensors]],
         shuffle: bool,
         batch_size: int,
@@ -125,6 +127,7 @@ class RLConfig(DictConfig):
         fsdp_reshard_after_forward: Optional[bool] = None,
         ac_mode: Optional[str] = None,
         ac_option: Optional[int] = None,
+        num_output_chunks: Optional[int] = None,
         collate_fn: Optional[str] = None,
         profiler: Optional[ComponentConfig] = None,
     ) -> None:
@@ -170,6 +173,8 @@ class RLConfig(DictConfig):
             self.ac_mode = ac_mode
         if ac_option is not None:
             self.ac_option = ac_option
+        if num_output_chunks is not None:
+            self.num_output_chunks = num_output_chunks
         if collate_fn is not None:
             self.collate_fn = collate_fn
         if profiler is not None:
@@ -494,13 +499,16 @@ class RLRecipe(FTRecipeInterface):
         self._loss_fn = instantiate_component(cfg.loss)
 
         if self._compile:
-            training.compile_loss(self._loss_fn, verbose=self._is_rank_zero)
-
-        if hasattr(self._loss_fn, "num_output_chunks"):
-            # set num_output_chunks for model
-            self._model.set_num_output_chunks(
-                getattr(self._loss_fn, "num_output_chunks")
+            if self._is_rank_zero:
+                log.info("Compiling loss with torch.compile...")
+            self._loss_fn._forward_chunk = torch.compile(
+                self._loss_fn._forward_chunk,
+                backend=os.environ.get("TORCH_COMPILE_BACKEND", "inductor"),
             )
+
+        if cfg.get("num_output_chunks", None) is not None:
+            # set num_output_chunks for model
+            self._model.set_num_output_chunks(cfg.num_output_chunks)
 
         if self._is_rank_zero:
             log.info("Loss is initialized.")
@@ -945,8 +953,7 @@ class RLRecipe(FTRecipeInterface):
 
         # Initialize tokens count and running loss (for grad accumulation)
         t0 = time.perf_counter()
-        running_loss = 0
-        num_tokens = 0
+        running_result = PPOResult()
 
         self._profiler.start()
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
@@ -976,7 +983,7 @@ class RLRecipe(FTRecipeInterface):
                 utils.batch_to_device(batch, self._device)  # type: ignore - `batch_to_device` expects a `dict`, not a `TypedDict`, but this should be fine
 
                 # Assuming the first token in the batch is the bos token
-                bos_id = int(batch["tokens"][0, 0].item())
+                bos_id = int(batch["tokens"].view(-1)[0].item())
 
                 with self.activations_handling_ctx:
                     logits = self._model.forward(
@@ -986,7 +993,7 @@ class RLRecipe(FTRecipeInterface):
                     )
 
                 # Compute loss
-                current_loss, current_num_tokens = self._loss_fn(
+                current_result = self._loss_fn.forward(
                     logits,
                     batch["tokens"],
                     batch["advantages"],
@@ -997,15 +1004,17 @@ class RLRecipe(FTRecipeInterface):
                 # free logits otherwise it peaks backward memory
                 del logits
 
-                running_loss += current_loss
-                num_tokens += current_num_tokens
+                running_result += current_result
 
                 # For optimizer in backward, we need to normalize before calling backward
                 # This case and gradient accumulation are mutually exclusive
                 if self._optimizer_in_bwd:
-                    torch.distributed.all_reduce(num_tokens)
-                    torch.distributed.all_reduce(running_loss)
-                    current_loss = current_loss / num_tokens
+                    if training.is_distributed():
+                        for tensor in running_result.__dataclass_fields__.values():
+                            torch.distributed.all_reduce(tensor)
+                    current_loss = current_result.total_loss / current_result.num_tokens
+                else:
+                    current_loss = current_result.total_loss
 
                 current_loss.backward()
 
@@ -1013,12 +1022,10 @@ class RLRecipe(FTRecipeInterface):
                 if (idx + 1) % self._gradient_accumulation_steps == 0:
                     if self._optimizer:
                         if training.is_distributed():
-                            # Get total number of tokens across all ranks to normalize gradients
-                            torch.distributed.all_reduce(num_tokens)
-                            # This will ensure that the logged loss matches what we're optimizing
-                            torch.distributed.all_reduce(running_loss)
+                            for tensor in running_result.__dataclass_fields__.values():
+                                torch.distributed.all_reduce(tensor)
                         # Manually scale the gradients from unnormalized loss by total # of tokens
-                        training.scale_grads(self._model, 1 / num_tokens)
+                        training.scale_grads(self._model, 1 / running_result.num_tokens)
                         if self._clip_grad_norm is not None:
                             grad_norm = torch.nn.utils.clip_grad_norm_(
                                 self._model.parameters(),
@@ -1030,7 +1037,9 @@ class RLRecipe(FTRecipeInterface):
                     # Update the number of steps when the weights are updated
                     self.global_step += 1
 
-                    loss_to_log = running_loss.item() / num_tokens
+                    loss_to_log = (
+                        running_result.total_loss.item() / running_result.num_tokens
+                    )
                     pbar.update(1)
                     pbar.set_description(
                         f"{curr_epoch + 1}|{self.global_step}|Loss: {loss_to_log}"
@@ -1045,7 +1054,11 @@ class RLRecipe(FTRecipeInterface):
                         log_dict = {
                             "loss": loss_to_log,
                             "lr": get_lr(self._optimizer or self._optim_ckpt_wrapper),
-                            "tokens_per_second_per_gpu": num_tokens
+                            "entropy": running_result.entropy_bonus.item()
+                            / running_result.num_tokens,
+                            "kl_div": running_result.kl_divergence.item()
+                            / running_result.num_tokens,
+                            "tokens_per_second_per_gpu": running_result.num_tokens
                             / (time_per_step * world_size),
                         }
                         if self._log_peak_memory_stats:
@@ -1060,8 +1073,7 @@ class RLRecipe(FTRecipeInterface):
                         )
 
                     # Reset running stats for the next step
-                    running_loss = 0
-                    num_tokens = 0
+                    running_result = PPOResult()
                     t0 = time.perf_counter()
 
                     # Stop tracking CUDA memory now that active steps are complete

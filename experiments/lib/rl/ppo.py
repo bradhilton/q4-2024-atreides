@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 from typing import Optional, Union
@@ -31,11 +32,49 @@ def shift(
     return torch.cat((labels[..., 1:], ignore_labels_cache[key]), dim=1)
 
 
+tensor_field = lambda: field(default_factory=lambda: torch.tensor(0.0))
+
+
+@dataclass
+class PPOResult:
+    policy_weight: torch.Tensor = tensor_field()
+    entropy_weight: torch.Tensor = tensor_field()
+    kl_weight: torch.Tensor = tensor_field()
+    policy_loss: torch.Tensor = tensor_field()
+    entropy_bonus: torch.Tensor = tensor_field()
+    kl_divergence: torch.Tensor = tensor_field()
+    num_tokens: torch.Tensor = field(default_factory=lambda: torch.tensor(0))
+
+    def __iadd__(self, other: "PPOResult") -> "PPOResult":
+        self.policy_weight += other.policy_weight
+        self.entropy_weight += other.entropy_weight
+        self.kl_weight += other.kl_weight
+        self.policy_loss += other.policy_loss
+        self.entropy_bonus += other.entropy_bonus
+        self.kl_divergence += other.kl_divergence
+        self.num_tokens += other.num_tokens
+        return self
+
+    @property
+    def total_loss(self) -> torch.Tensor:
+        return (
+            (self.policy_weight / self.num_tokens) * self.policy_loss
+            - (self.entropy_weight / self.num_tokens) * self.entropy_bonus
+            + (self.kl_weight / self.num_tokens) * self.kl_divergence
+        )
+
+    @property
+    def policy_coef(self) -> float:
+        return self.policy_weight.item() / self.num_tokens.item()
+
+
 class PPOLoss(nn.Module):
     def __init__(
         self,
+        policy_coef: float = 1.0,
         clip_epsilon=0.2,
         entropy_coef=0.01,
+        kl_coef=0.0,
         advantage_normalization_alpha: Optional[float] = 1.0,
         advantage_normalization_deviation: DeviationType = "std",
     ):
@@ -43,8 +82,10 @@ class PPOLoss(nn.Module):
         Initializes the PPO Loss module.
 
         Args:
+            policy_coef (float): Coefficient for the policy loss. Defaults to 1.0.
             clip_epsilon (float): Clipping parameter for PPO (typically between 0.1 and 0.3).
             entropy_coef (float): Coefficient for the entropy bonus to encourage exploration.
+            kl_coef (float): Coefficient for KL divergence penalty (defaults to 0.0).
             advantage_normalization_alpha (Optional[float] = 1.0):
                 Alpha parameter [0, 1] for the running mean and deviation used to normalize
                 advantages (if None, no normalization is applied):
@@ -59,8 +100,10 @@ class PPOLoss(nn.Module):
                 - "mad": Mean absolute deviation.
         """
         super(PPOLoss, self).__init__()
+        self.policy_coef = policy_coef
         self.clip_epsilon = clip_epsilon
         self.entropy_coef = entropy_coef
+        self.kl_coef = kl_coef
         self.advantage_normalizer = (
             RunningNormalizer(
                 advantage_normalization_alpha, advantage_normalization_deviation
@@ -71,19 +114,20 @@ class PPOLoss(nn.Module):
 
     def forward(
         self,
-        logits: torch.Tensor,
+        logits: Union[torch.Tensor, list[torch.Tensor]],
         tokens: torch.Tensor,
         advantages: torch.Tensor,
         logprobs: torch.Tensor,
         bos_id: Optional[int] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> PPOResult:
         """
-        Computes the PPO loss for sequence data.
+        Computes the PPO loss for sequence data, supporting both regular and chunked inputs.
 
         Args:
-            logits (Tensor):
-                Shape: (batch_size, sequence_length, vocab_size)
-                Logits output by the new policy for next token preferences.
+            logits (Union[Tensor, List[Tensor]]):
+                Either a single tensor of shape (batch_size, sequence_length, vocab_size)
+                or a list of chunked tensors, each of shape
+                (batch_size, sequence_length/num_chunks, vocab_size).
 
             tokens (Tensor):
                 Shape: (batch_size, sequence_length)
@@ -102,11 +146,34 @@ class PPOLoss(nn.Module):
                 to the first token in `tokens`.
 
         Returns:
-            total_loss (Tensor):
-                Scalar tensor representing the combined PPO loss.
+            PPOResult: The combined loss results across all chunks.
+        """
+        if isinstance(logits, list):
+            result = PPOResult()
+            num_chunks = len(logits)
+            for logit_chunk, token_chunk, adv_chunk, logprob_chunk in zip(
+                logits,
+                tokens.chunk(num_chunks, dim=1),
+                advantages.chunk(num_chunks, dim=1),
+                logprobs.chunk(num_chunks, dim=1),
+            ):
+                result += self._forward_chunk(
+                    logit_chunk, token_chunk, adv_chunk, logprob_chunk, bos_id
+                )
+            return result
 
-            num_tokens (Tensor):
-                Scalar tensor representing the number of valid tokens used to compute the loss.
+        return self._forward_chunk(logits, tokens, advantages, logprobs, bos_id)
+
+    def _forward_chunk(
+        self,
+        logits: torch.Tensor,
+        tokens: torch.Tensor,
+        advantages: torch.Tensor,
+        logprobs: torch.Tensor,
+        bos_id: Optional[int],
+    ) -> PPOResult:
+        """
+        Processes a single chunk of the PPO loss computation.
         """
         if bos_id is None:
             bos_id = int(tokens.view(-1)[0].item())
@@ -159,7 +226,15 @@ class PPOLoss(nn.Module):
         # Entropy bonus (to encourage exploration)
         entropy_bonus = entropy.sum()  # Scalar
 
-        # Total loss
-        total_loss = policy_loss - self.entropy_coef * entropy_bonus  # Scalar
+        # Calculate KL divergence
+        kl_divergence = (torch.exp(logprobs) * (logprobs - new_logprobs)).sum()
 
-        return total_loss, num_tokens
+        return PPOResult(
+            policy_weight=self.policy_coef * num_tokens,
+            entropy_weight=self.entropy_coef * num_tokens,
+            kl_weight=self.kl_coef * num_tokens,
+            policy_loss=policy_loss,
+            entropy_bonus=entropy_bonus,
+            kl_divergence=kl_divergence,
+            num_tokens=num_tokens,
+        )
