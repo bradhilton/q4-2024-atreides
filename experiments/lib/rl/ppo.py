@@ -1,7 +1,7 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 import torch
 import torch.nn as nn
-from typing import Optional, Union
+from typing import Iterable, Optional, Union
 
 
 from .running_normalizer import DeviationType, RunningNormalizer
@@ -45,14 +45,18 @@ class PPOResult:
     kl_divergence: torch.Tensor = tensor_field()
     num_tokens: torch.Tensor = field(default_factory=lambda: torch.tensor(0))
 
+    def tensors(self) -> Iterable[torch.Tensor]:
+        for field in fields(self):
+            yield getattr(self, field.name)
+
+    def to(self, target: Union[torch.device, torch.dtype]) -> "PPOResult":
+        for tensor in self.tensors():
+            tensor.to(target)
+        return self
+
     def __iadd__(self, other: "PPOResult") -> "PPOResult":
-        self.policy_weight += other.policy_weight
-        self.entropy_weight += other.entropy_weight
-        self.kl_weight += other.kl_weight
-        self.policy_loss += other.policy_loss
-        self.entropy_bonus += other.entropy_bonus
-        self.kl_divergence += other.kl_divergence
-        self.num_tokens += other.num_tokens
+        for tensor, other_tensor in zip(self.tensors(), other.tensors()):
+            tensor += other_tensor.to(tensor.device)
         return self
 
     @property
@@ -62,10 +66,6 @@ class PPOResult:
             - (self.entropy_weight / self.num_tokens) * self.entropy_bonus
             + (self.kl_weight / self.num_tokens) * self.kl_divergence
         )
-
-    @property
-    def policy_coef(self) -> float:
-        return self.policy_weight.item() / self.num_tokens.item()
 
 
 class PPOLoss(nn.Module):
@@ -226,8 +226,20 @@ class PPOLoss(nn.Module):
         # Entropy bonus (to encourage exploration)
         entropy_bonus = entropy.sum()  # Scalar
 
-        # Calculate KL divergence
-        kl_divergence = (torch.exp(logprobs) * (logprobs - new_logprobs)).sum()
+        # Debugging
+        if False:
+            new_probs = torch.exp(new_logprobs)
+            old_probs = torch.exp(logprobs)
+            print(
+                torch.corrcoef(torch.stack([new_probs, old_probs], dim=1).T)[
+                    0, 1
+                ].item()
+            )
+
+        # Calculate KL divergence between the old and new policies
+        kl_divergence = torch.nn.functional.kl_div(
+            new_logprobs, logprobs, reduction="sum", log_target=True
+        )
 
         return PPOResult(
             policy_weight=self.policy_coef * num_tokens,

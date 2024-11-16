@@ -953,7 +953,7 @@ class RLRecipe(FTRecipeInterface):
 
         # Initialize tokens count and running loss (for grad accumulation)
         t0 = time.perf_counter()
-        running_result = PPOResult()
+        running_result = PPOResult().to(self._device)
 
         self._profiler.start()
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
@@ -988,8 +988,8 @@ class RLRecipe(FTRecipeInterface):
                 with self.activations_handling_ctx:
                     logits = self._model.forward(
                         tokens=batch["tokens"],
-                        mask=create_packed_causal_mask(batch["tokens"], bos_id=bos_id),
-                        input_pos=get_input_pos(batch["tokens"], bos_id=bos_id),
+                        # mask=create_packed_causal_mask(batch["tokens"], bos_id=bos_id),
+                        # input_pos=get_input_pos(batch["tokens"], bos_id=bos_id),
                     )
 
                 # Compute loss
@@ -1010,7 +1010,7 @@ class RLRecipe(FTRecipeInterface):
                 # This case and gradient accumulation are mutually exclusive
                 if self._optimizer_in_bwd:
                     if training.is_distributed():
-                        for tensor in running_result.__dataclass_fields__.values():
+                        for tensor in running_result.tensors():
                             torch.distributed.all_reduce(tensor)
                     current_loss = current_result.total_loss / current_result.num_tokens
                 else:
@@ -1022,7 +1022,7 @@ class RLRecipe(FTRecipeInterface):
                 if (idx + 1) % self._gradient_accumulation_steps == 0:
                     if self._optimizer:
                         if training.is_distributed():
-                            for tensor in running_result.__dataclass_fields__.values():
+                            for tensor in running_result.tensors():
                                 torch.distributed.all_reduce(tensor)
                         # Manually scale the gradients from unnormalized loss by total # of tokens
                         training.scale_grads(self._model, 1 / running_result.num_tokens)
@@ -1054,6 +1054,8 @@ class RLRecipe(FTRecipeInterface):
                         log_dict = {
                             "loss": loss_to_log,
                             "lr": get_lr(self._optimizer or self._optim_ckpt_wrapper),
+                            "policy": running_result.policy_loss.item()
+                            / running_result.num_tokens,
                             "entropy": running_result.entropy_bonus.item()
                             / running_result.num_tokens,
                             "kl_div": running_result.kl_divergence.item()
