@@ -50,7 +50,10 @@ class Trajectory:
             completion.weight *= self.buffer.completion_decay
         self.decayed = True
 
-    async def prompt_logprobs(self) -> list:
+    async def _prompt_logprobs(self) -> list:
+        """
+        For debugging purposes.
+        """
         chat_completion = (
             await self.buffer.completion_sampler.client.chat.completions.create(
                 messages=self.terminus.all_message_params(),
