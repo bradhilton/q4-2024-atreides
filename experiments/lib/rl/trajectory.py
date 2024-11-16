@@ -55,8 +55,12 @@ class Trajectory:
             await self.buffer.completion_sampler.client.chat.completions.create(
                 messages=self.terminus.all_message_params(),
                 model=await self.buffer.completion_sampler.get_model(),
-                max_completion_tokens=1,
-                extra_body={"prompt_logprobs": 1},
+                max_tokens=1,
+                extra_body={
+                    "add_generation_prompt": False,
+                    "continue_final_message": True,
+                    "prompt_logprobs": 1,
+                },
             )
         )
         return chat_completion.prompt_logprobs  # type: ignore
@@ -113,15 +117,15 @@ def trajectory_tensors(batch: list[list[Trajectory]], seqlen: int) -> Trajectory
         tokenizer.get_pad_token_id() or 0,
         dtype=torch.int64,
     )
-    tensor_dict: TrajectoryTensors = {
+    tensors: TrajectoryTensors = {
         "tokens": tokens,
         "advantages": torch.full_like(
             tokens, fill_value=torch.nan, dtype=torch.float32
         ),
         "logprobs": torch.full_like(tokens, fill_value=torch.nan, dtype=torch.float32),
     }
-    write_trajectory_batch(batch, tensor_dict, start=0)
-    return tensor_dict
+    write_trajectory_batch(batch, tensors, start=0)
+    return tensors
 
 
 def write_trajectory_batch(
@@ -129,33 +133,29 @@ def write_trajectory_batch(
 ) -> None:
     tokenizer = batch[0][0].buffer.tokenizer
     rows, seqlen = tensors["tokens"].shape
-    for row, selected_trajectories in enumerate(batch, start):
-        # Wrap row index back to start if it exceeds number of rows, enabling circular buffer behavior
-        row %= rows
+    for row, trajectories in enumerate(batch, start):
         tensors["tokens"][row] = tokenizer.encode(
             [
-                trajectory.terminus.all_message_params()
-                for trajectory in selected_trajectories
+                trajectory.terminus.all_message_params() for trajectory in trajectories
             ],  # type: ignore
             concatenate=True,
             seqlen=seqlen,
         )
         replacement_token = "<|reserved_special_token_250|>"
         mask = tokenizer.encode(
-            [trajectory.terminus.all_message_params(replacement_token=replacement_token) for trajectory in selected_trajectories],  # type: ignore
+            [trajectory.terminus.all_message_params(replacement_token=replacement_token) for trajectory in trajectories],  # type: ignore
             concatenate=True,
             seqlen=seqlen,
         ) == tokenizer.get_token_id(replacement_token)
-        mask_size = mask.sum()
         tensors["advantages"][row] = torch.full_like(
             mask, fill_value=torch.nan, dtype=torch.float32
         )
         tensors["advantages"][row][mask] = torch.tensor(
             list(
                 advantage
-                for trajectory in selected_trajectories
+                for trajectory in trajectories
                 for advantage in trajectory.terminus.all_token_advantages()
-            )  # [:mask_size]
+            )
         )
         tensors["logprobs"][row] = torch.full_like(
             mask, fill_value=torch.nan, dtype=torch.float32
@@ -163,9 +163,9 @@ def write_trajectory_batch(
         tensors["logprobs"][row][mask] = torch.tensor(
             list(
                 logprob
-                for trajectory in selected_trajectories
+                for trajectory in trajectories
                 for logprob in trajectory.terminus.all_logprobs()
-            )  # [:mask_size]
+            )
         )
 
 

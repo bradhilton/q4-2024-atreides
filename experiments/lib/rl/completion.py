@@ -497,13 +497,18 @@ def message_param(
     replacement_token: Optional[str] = None,
 ) -> ChatCompletionAssistantMessageParam:
     message = choice.message
-    if replacement_token and choice.logprobs:
+    if choice.logprobs:
         message = message.model_copy()
-        replacement = replacement_token
         if choice.logprobs.content:
-            message.content = replacement * len(choice.logprobs.content)
+            message.content = "".join(
+                replacement_token or token_logprob.token
+                for token_logprob in choice.logprobs.content
+            )
         if choice.logprobs.refusal:
-            message.refusal = replacement * len(choice.logprobs.refusal)
+            message.refusal = "".join(
+                replacement_token or token_logprob.token
+                for token_logprob in choice.logprobs.refusal
+            )
     message_param: ChatCompletionAssistantMessageParam = {
         "role": message.role,
     }

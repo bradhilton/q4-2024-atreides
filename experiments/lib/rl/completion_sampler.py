@@ -53,6 +53,7 @@ class CompletionSampler:
             "extra_body": {
                 **self.kwargs.get("extra_body", {}),
                 **kwargs.get("extra_body", {}),
+                "skip_special_tokens": False,
             },
         }
         if continue_last_message_if_assistant and messages[-1]["role"] == "assistant":

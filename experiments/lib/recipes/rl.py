@@ -988,8 +988,8 @@ class RLRecipe(FTRecipeInterface):
                 with self.activations_handling_ctx:
                     logits = self._model.forward(
                         tokens=batch["tokens"],
-                        # mask=create_packed_causal_mask(batch["tokens"], bos_id=bos_id),
-                        # input_pos=get_input_pos(batch["tokens"], bos_id=bos_id),
+                        mask=create_packed_causal_mask(batch["tokens"], bos_id=bos_id),
+                        input_pos=get_input_pos(batch["tokens"], bos_id=bos_id),
                     )
 
                 # Compute loss
@@ -1040,9 +1040,23 @@ class RLRecipe(FTRecipeInterface):
                     loss_to_log = (
                         running_result.total_loss.item() / running_result.num_tokens
                     )
+                    policy_to_log = (
+                        running_result.policy_loss.item() / running_result.num_tokens
+                    )
+                    entropy_to_log = (
+                        running_result.entropy_bonus.item() / running_result.num_tokens
+                    )
+                    kl_div_to_log = (
+                        running_result.kl_divergence.item() / running_result.num_tokens
+                    )
                     pbar.update(1)
                     pbar.set_description(
-                        f"{curr_epoch + 1}|{self.global_step}|Loss: {loss_to_log}"
+                        f"{curr_epoch + 1}|{self.global_step}|Loss: {loss_to_log:.4f}"
+                    )
+                    pbar.set_postfix(
+                        policy=f"{policy_to_log:.4f}",
+                        entropy=f"{entropy_to_log:.4f}",
+                        kl_div=f"{kl_div_to_log:.4f}",
                     )
 
                     # Log per-step metrics
@@ -1054,12 +1068,9 @@ class RLRecipe(FTRecipeInterface):
                         log_dict = {
                             "loss": loss_to_log,
                             "lr": get_lr(self._optimizer or self._optim_ckpt_wrapper),
-                            "policy": running_result.policy_loss.item()
-                            / running_result.num_tokens,
-                            "entropy": running_result.entropy_bonus.item()
-                            / running_result.num_tokens,
-                            "kl_div": running_result.kl_divergence.item()
-                            / running_result.num_tokens,
+                            "policy": policy_to_log,
+                            "entropy": entropy_to_log,
+                            "kl_div": kl_div_to_log,
                             "tokens_per_second_per_gpu": running_result.num_tokens
                             / (time_per_step * world_size),
                         }
