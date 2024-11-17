@@ -4,9 +4,6 @@ import torch.nn as nn
 from typing import Iterable, Optional, Union
 
 
-from .running_normalizer import DeviationType, RunningNormalizer
-
-
 ignore_labels_cache: dict[
     tuple[torch.Size, Union[int, float], torch.dtype, torch.device], torch.Tensor
 ] = {}
@@ -21,15 +18,25 @@ def shift(
             if labels.dtype in (torch.int32, torch.int64, torch.int16, torch.int8)
             else float("nan")
         )
-    key = (labels.shape[-1:], ignore_label, labels.dtype, labels.device)
-    if key not in ignore_labels_cache:
-        ignore_labels_cache[key] = torch.full(
+
+    # Create a tensor of ignore labels every time if we are compiling, otherwise cache it
+    if torch.compiler.is_compiling():
+        ignore_labels = torch.full(
             (labels.shape[0], 1), ignore_label, dtype=labels.dtype, device=labels.device
         )
+    else:
+        key = (labels.shape[-1:], ignore_label, labels.dtype, labels.device)
+        if key not in ignore_labels_cache:
+            ignore_labels_cache[key] = torch.full(
+                (labels.shape[0], 1),
+                ignore_label,
+                dtype=labels.dtype,
+                device=labels.device,
+            )
+        ignore_labels = ignore_labels_cache[key]
+
     # Shift labels to compute loss
-    # equivalent to doing labels[..., 1:] and logits[..., :-1, :]
-    # But this way we dont need to slice the logits. We just add an ignore index to labels.
-    return torch.cat((labels[..., 1:], ignore_labels_cache[key]), dim=1)
+    return torch.cat((labels[..., 1:], ignore_labels), dim=1)
 
 
 tensor_field = lambda: field(default_factory=lambda: torch.tensor(0.0))
@@ -75,8 +82,7 @@ class PPOLoss(nn.Module):
         clip_epsilon=0.2,
         entropy_coef=0.01,
         kl_coef=0.0,
-        advantage_normalization_alpha: Optional[float] = 1.0,
-        advantage_normalization_deviation: DeviationType = "std",
+        normalize_advantages: bool = True,
     ):
         """
         Initializes the PPO Loss module.
@@ -86,31 +92,13 @@ class PPOLoss(nn.Module):
             clip_epsilon (float): Clipping parameter for PPO (typically between 0.1 and 0.3).
             entropy_coef (float): Coefficient for the entropy bonus to encourage exploration.
             kl_coef (float): Coefficient for KL divergence penalty (defaults to 0.0).
-            advantage_normalization_alpha (Optional[float] = 1.0):
-                Alpha parameter [0, 1] for the running mean and deviation used to normalize
-                advantages (if None, no normalization is applied):
-                - alpha == 0.0: Expanding window/equal-weight normalization.
-                - 0.0 < alpha < 1.0: Exponentially weighted normalization.
-                - alpha == 1.0: Batch normalization.
-                - alpha is None: No normalization.
-                Defaults to 1.0 (batch normalization).
-            advantage_normalization_deviation (DeviationType = "std"):
-                Type of deviation to use for advantage normalization (defaults to "std"):
-                - "std": Standard deviation.
-                - "mad": Mean absolute deviation.
         """
         super(PPOLoss, self).__init__()
         self.policy_coef = policy_coef
         self.clip_epsilon = clip_epsilon
         self.entropy_coef = entropy_coef
         self.kl_coef = kl_coef
-        self.advantage_normalizer = (
-            RunningNormalizer(
-                advantage_normalization_alpha, advantage_normalization_deviation
-            )
-            if advantage_normalization_alpha is not None
-            else None
-        )
+        self.normalize_advantages = normalize_advantages
 
     def forward(
         self,
@@ -148,21 +136,22 @@ class PPOLoss(nn.Module):
         Returns:
             PPOResult: The combined loss results across all chunks.
         """
+        if bos_id is None:
+            bos_id = int(tokens.view(-1)[0].item())
+
         if isinstance(logits, list):
             result = PPOResult()
             num_chunks = len(logits)
-            for logit_chunk, token_chunk, adv_chunk, logprob_chunk in zip(
+            for chunked_args in zip(
                 logits,
                 tokens.chunk(num_chunks, dim=1),
                 advantages.chunk(num_chunks, dim=1),
                 logprobs.chunk(num_chunks, dim=1),
             ):
-                result += self._forward_chunk(
-                    logit_chunk, token_chunk, adv_chunk, logprob_chunk, bos_id
-                )
+                result += self._forward_chunk(*chunked_args, bos_id=bos_id)
             return result
 
-        return self._forward_chunk(logits, tokens, advantages, logprobs, bos_id)
+        return self._forward_chunk(logits, tokens, advantages, logprobs, bos_id=bos_id)
 
     def _forward_chunk(
         self,
@@ -170,13 +159,11 @@ class PPOLoss(nn.Module):
         tokens: torch.Tensor,
         advantages: torch.Tensor,
         logprobs: torch.Tensor,
-        bos_id: Optional[int],
+        bos_id: int,
     ) -> PPOResult:
         """
         Processes a single chunk of the PPO loss computation.
         """
-        if bos_id is None:
-            bos_id = int(tokens.view(-1)[0].item())
         # Flatten logits tensor to shape (batch_size * sequence_length, vocab_size)
         logits = logits.view(-1, logits.size(-1))
         # Shape: (batch_size * sequence_length,)
@@ -206,9 +193,8 @@ class PPOLoss(nn.Module):
         advantages = advantages[mask]  # Shape: (num_tokens,)
         entropy = entropy[mask]  # Shape: (num_tokens,)
 
-        # Normalize advantages
-        if self.advantage_normalizer is not None:
-            advantages = self.advantage_normalizer.normalize(advantages)
+        if self.normalize_advantages:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # Calculate the probability ratio (π_θ(a|s) / π_θ_old(a|s))
         ratio = torch.exp(new_logprobs - logprobs)  # Shape: (num_valid_tokens,)
@@ -226,15 +212,15 @@ class PPOLoss(nn.Module):
         # Entropy bonus (to encourage exploration)
         entropy_bonus = entropy.sum()  # Scalar
 
-        # Debugging
-        if False:
-            new_probs = torch.exp(new_logprobs)
-            old_probs = torch.exp(logprobs)
-            print(
-                torch.corrcoef(torch.stack([new_probs, old_probs], dim=1).T)[
-                    0, 1
-                ].item()
-            )
+        # # Debugging
+        # if False:
+        #     new_probs = torch.exp(new_logprobs)
+        #     old_probs = torch.exp(logprobs)
+        #     print(
+        #         torch.corrcoef(torch.stack([new_probs, old_probs], dim=1).T)[
+        #             0, 1
+        #         ].item()
+        #     )
 
         # Calculate KL divergence between the old and new policies
         kl_divergence = torch.nn.functional.kl_div(

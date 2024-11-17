@@ -472,6 +472,8 @@ class RLRecipe(FTRecipeInterface):
         checkpoint_dict = self.load_checkpoint(cfg_checkpointer=cfg.checkpointer)
 
         self._compile: bool = cfg.get("compile", False)
+        if self._compile:
+            torch.empty(1, device=self._device, requires_grad=True).backward()
         self._model = self._setup_model(
             cfg_model=cfg.model,
             enable_activation_checkpointing=self._enable_activation_checkpointing,
@@ -1110,7 +1112,7 @@ class RLRecipe(FTRecipeInterface):
                     self._profiler.step()
 
             self.epochs_run += 1
-            self.save_checkpoint(epoch=curr_epoch)
+            # self.save_checkpoint(epoch=curr_epoch)
 
         self._profiler.stop()
 
