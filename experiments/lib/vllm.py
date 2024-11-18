@@ -1,12 +1,13 @@
 import asyncio
 import copy
+from dataclasses import dataclass
 import json
 from openai import AsyncOpenAI
 import os
 import random
 import re
 import socket
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 from uvicorn.config import LOGGING_CONFIG as UVICORN_LOGGING_CONFIG
 
 os.environ["VLLM_LOGGING_CONFIG_PATH"] = __file__.replace(
@@ -85,6 +86,58 @@ async def start_vllm_server(
         except Exception:
             continue
     return server_task.cancel, client
+
+
+@dataclass
+class vLLM:
+    client: AsyncOpenAI
+    process: asyncio.subprocess.Process
+
+    def __del__(self) -> None:
+        self.process.terminate()
+
+
+async def start_vllm(
+    model: str,
+    timeout: float = 120.0,
+    env: Optional[dict[str, str]] = None,
+    **kwargs: Any,
+) -> vLLM:
+    process = await asyncio.create_subprocess_exec(
+        "vllm",
+        "serve",
+        model,
+        *[
+            f"--{key.replace('_', '-')}{f'=={value}' if value != True else ''}"
+            for key, value in kwargs.items()
+        ],
+        "--api-key==default",
+        stdout=open("./logs/vllm.log", "w"),
+        stderr=open("./logs/vllm.log", "a"),
+        env={
+            **os.environ,
+            **(env or {}),
+        },
+    )
+    client = AsyncOpenAI(
+        api_key="default",
+        base_url=f"http://{kwargs.get("host", '0.0.0.0')}:{kwargs.get("port", 8000)}/v1",
+    )
+    start = asyncio.get_event_loop().time()
+    while True:
+        try:
+            await client.chat.completions.create(
+                messages=[{"role": "user", "content": "Hello"}],
+                model=model,
+                max_tokens=1,
+            )
+            break
+        except Exception:
+            if asyncio.get_event_loop().time() - start > timeout:
+                process.terminate()
+                raise TimeoutError("vLLM server did not start in time")
+            continue
+    return vLLM(client, process)
 
 
 def vllm_server_metrics(last_n_lines: int = 5) -> tuple[int, int]:

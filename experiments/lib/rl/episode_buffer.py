@@ -160,19 +160,6 @@ class EpisodeBuffer:
             episode_sampler.num_goldilocks += 1
         return True
 
-    # def trajectories(self) -> list[Trajectory]:
-    #     return sorted(
-    #         (
-    #             episode.best_trajectory(
-    #                 self.tokenizer,
-    #                 episode_decay=self.episode_decay,
-    #                 completion_decay=self.completion_decay,
-    #             )
-    #             for episode in self.episodes
-    #         ),
-    #         key=lambda trajectory: trajectory.score(),
-    #     )
-
     def __del__(self) -> None:
         if self.buffer_task:
             self.buffer_task.cancel()
