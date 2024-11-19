@@ -5,7 +5,6 @@ from typing import Any, Callable, Coroutine, Literal, Optional, Protocol
 from .completion import Completion, SplitMethod
 from .completion_sampler import CompletionSampler
 
-# from .trajectory import Trajectory
 from ..tokenizer import Tokenizer
 
 
@@ -46,10 +45,10 @@ class Episode:
     def __hash__(self) -> int:
         return id(self)
 
-    def num_samples(self) -> int:
+    def num_samples(self, model: Optional[str] = None) -> int:
         if len(self.completion.children) == 0:
             return 0
-        return sum(1 for _ in self.completion.leaves())
+        return sum(1 for _ in self.completion.leaves(model=model))
 
     async def sample_completions(
         self,
@@ -60,39 +59,34 @@ class Episode:
         split_by: SplitMethod = "count",
         split_separators: Optional[set[str]] = None,
     ) -> bool:
-        parent = self.get_sampleable_parent(tokenizer, split_by, split_separators)
+        model = await completion_sampler.get_model()
+        parent = self.get_sampleable_parent(
+            model, tokenizer, split_by, split_separators
+        )
         if parent is None:
             return False
-        model = await completion_sampler.get_model()
-        num_children = sum(1 for child in parent.children if child.model == model)
-        n = branch_factor - num_children
-        if n <= 0:
-            return False
-        completions = await completion_sampler.sample_completions(
+        return await self._sample_completions(
             parent,
-            strip=split_separators or set(),
-            n=n,
+            model,
+            completion_sampler,
+            branch_factor,
+            fork_decay,
+            split_separators or set(),
         )
-        if num_children:
-            for completion in completions:
-                completion.weight *= fork_decay
-                completion.fork = True
-        on_sample = self.on_sample(completions)
-        if isinstance(on_sample, Coroutine):
-            await on_sample
-        return True
 
     def get_sampleable_parent(
         self,
+        model: str,
         tokenizer: Tokenizer,
         split_method: SplitMethod,
         split_separators: Optional[set[str]],
     ) -> Optional[Completion]:
-        if not self.completion.children:
+        if not any(child.model == model for child in self.completion.children):
             return self.completion
         try:
             leaf = self.best_leaf(
                 tokenizer,
+                model=model,
                 split_method=split_method,
                 split_separators=split_separators,
                 where_leaf_or_ancestor_is_splittable=True,
@@ -119,6 +113,7 @@ class Episode:
         self,
         tokenizer: Tokenizer,
         *,
+        model: Optional[str] = None,
         split_method: SplitMethod,
         split_separators: Optional[set[str]] = None,
         where_leaf_or_ancestor_is_splittable: Optional[Literal[True]] = None,
@@ -127,7 +122,7 @@ class Episode:
         return max(
             (
                 completion
-                for completion in self.completion.leaves()
+                for completion in self.completion.leaves(model=model)
                 if not where_leaf_or_ancestor_is_splittable
                 or any(
                     c.can_split(split_method, separators=split_separators)
@@ -137,15 +132,83 @@ class Episode:
             key=lambda c: c.all_abs_advantage_per_token(tokenizer, cache=cache),
         )
 
-    # def best_trajectory(
-    #     self, tokenizer: Tokenizer, *, episode_decay: float, completion_decay: float
-    # ) -> Trajectory:
-    #     terminus = self.best_leaf(tokenizer)
-    #     return Trajectory(
-    #         episode=self,
-    #         terminus=terminus,
-    #         abs_advantage=terminus.all_abs_advantage(cache=True),
-    #         token_count=terminus.all_token_count(tokenizer),
-    #         episode_decay=episode_decay,
-    #         completion_decay=completion_decay,
-    #     )
+    async def sample_completions_v2(
+        self,
+        completion_sampler: CompletionSampler,
+        branch_factor: int,
+        max_parallel_splits: int = 1,
+        split_by: SplitMethod = "count",
+        split_separators: Optional[set[str]] = None,
+    ) -> bool:
+        model = await completion_sampler.get_model()
+        parents = self._get_sampleable_parents(
+            max_parallel_splits,
+            model,
+            split_by,
+            split_separators,
+        )
+        if not parents:
+            return False
+        return any(
+            await asyncio.gather(
+                *(
+                    self._sample_completions(
+                        parent,
+                        model,
+                        completion_sampler,
+                        branch_factor,
+                        fork_decay=1.0,
+                        split_separators=split_separators or set(),
+                    )
+                    for parent in parents
+                )
+            )
+        )
+
+    def _get_sampleable_parents(
+        self,
+        max_parallel_splits: int,
+        model: str,
+        split_method: SplitMethod,
+        split_separators: Optional[set[str]],
+    ) -> list[Completion]:
+        if not any(child.model == model for child in self.completion.children):
+            return [self.completion]
+        return sorted(
+            (
+                c
+                for c in self.completion.descendants(model=model)
+                if c.can_split(by=split_method, separators=split_separators)
+            ),
+            key=lambda c: abs(c.advantage(cache=True, model=model))
+            * (c.split_weight(by=split_method) / c.num_token_logprobs())
+            * c.sample_probability(model=model),
+            reverse=True,
+        )[:max_parallel_splits]
+
+    async def _sample_completions(
+        self,
+        parent: Completion,
+        model: str,
+        completion_sampler: CompletionSampler,
+        branch_factor: int,
+        fork_decay: float,
+        split_separators: set[str],
+    ) -> bool:
+        num_children = sum(1 for child in parent.children if child.model == model)
+        n = branch_factor - num_children
+        if n <= 0:
+            return False
+        completions = await completion_sampler.sample_completions(
+            parent,
+            strip=split_separators,
+            n=n,
+        )
+        if num_children:
+            for completion in completions:
+                completion.weight *= fork_decay
+                completion.fork = True
+        on_sample = self.on_sample(completions)
+        if isinstance(on_sample, Coroutine):
+            await on_sample
+        return True

@@ -1,8 +1,10 @@
 import asyncio
 import copy
 from dataclasses import dataclass
+import httpx
 import json
 from openai import AsyncOpenAI
+from openai import DefaultAsyncHttpxClient
 import os
 import random
 import re
@@ -121,7 +123,10 @@ async def start_vllm(
     )
     client = AsyncOpenAI(
         api_key="default",
-        base_url=f"http://{kwargs.get("host", '0.0.0.0')}:{kwargs.get("port", 8000)}/v1",
+        base_url=f"http://{kwargs.get('host', '0.0.0.0')}:{kwargs.get('port', 8000)}/v1",
+        http_client=DefaultAsyncHttpxClient(
+            limits=httpx.Limits(max_connections=1024, max_keepalive_connections=128)
+        ),
     )
     start = asyncio.get_event_loop().time()
     while True:

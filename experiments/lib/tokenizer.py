@@ -39,13 +39,15 @@ class Tokenizer:
         return self.llm.get_tokenizer().convert_tokens_to_ids(token)  # type: ignore
 
     def get_token(self, token_id: int) -> str:
-        return self.llm.get_tokenizer().convert_ids_to_tokens(token_id)  # type: ignore
+        return self.llm.get_tokenizer().convert_ids_to_tokens(token_id, skip_special_tokens=False)  # type: ignore
 
     def encode(
         self,
         messages: Union[
             list[ChatCompletionMessageParam], list[list[ChatCompletionMessageParam]]
         ],
+        remove_bos: bool = False,
+        first_message_is_continuation: bool = False,
         add_generation_prompt: bool = False,
         continue_final_message: bool = True,
         concatenate: bool = False,
@@ -58,7 +60,13 @@ class Tokenizer:
             prompts: list[dict[str, str]], *args: object, **kwargs: object
         ) -> list[list[int]]:
             return [
-                tokenizer.encode(prompt["prompt"].removeprefix("<|begin_of_text|>"))
+                tokenizer.encode(prompt["prompt"].removeprefix("<|begin_of_text|>"))[
+                    (
+                        self.prefix_token_count
+                        if first_message_is_continuation
+                        else (1 if remove_bos else 0)
+                    ) :
+                ]
                 for prompt in prompts
             ]
 

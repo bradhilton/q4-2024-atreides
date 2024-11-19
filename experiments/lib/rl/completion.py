@@ -18,7 +18,6 @@ from openai.types.chat.chat_completion_system_message_param import (
 from openai.types.chat.chat_completion_tool_message_param import (
     ChatCompletionToolMessageParam,
 )
-
 from openai.types.chat.chat_completion_token_logprob import ChatCompletionTokenLogprob
 from pydantic import (
     BaseModel,
@@ -26,6 +25,8 @@ from pydantic import (
     model_validator,
     SkipValidation,
 )
+import random
+import torch
 from typing import (
     cast,
     Iterable,
@@ -80,6 +81,7 @@ class Completion:
         self.model = model
         self.fork = fork
         self._cached_values: dict[tuple[Optional[str], Optional[bool]], float] = {}
+        self._cached_sample_probabilities: dict[Optional[str], float] = {}
         for child in self.children:
             if child.parent is not self:
                 raise ValueError("Child completion's parent must be this completion.")
@@ -97,11 +99,13 @@ class Completion:
         if reward is not None:
             self.reward = reward
             self._cached_values = {}
+            self._cached_sample_probabilities = {}
         if not self.parent:
             return
         self.parent.commit()
         self.parent.children.add(self)
         self.parent._cached_values = {}
+        self.parent._cached_sample_probabilities = {}
 
     def value(
         self,
@@ -136,7 +140,7 @@ class Completion:
             self._cached_values[(model, fork)] = value
         return value
 
-    def advantage(self, cache: bool = False) -> float:
+    def advantage(self, cache: bool = False, model: Optional[str] = None) -> float:
         """
         Calculates the advantage value for this completion relative to its parent.
 
@@ -154,8 +158,8 @@ class Completion:
         if self.parent is None:
             return 0.0
         return (
-            self.value(cache=cache)
-            - (self.parent.value(cache=cache) - self.parent.reward)
+            self.value(cache=cache, model=model)
+            - (self.parent.value(cache=cache, model=model) - self.parent.reward)
         ) * self.weight
 
     # def adjustment(self, lambda_: float = 1.0) -> float:
@@ -187,26 +191,29 @@ class Completion:
     ) -> float:
         return self.all_abs_advantage(cache=cache) / self.all_token_count(tokenizer)
 
-    def ancestors(self, including_self: bool = False) -> Iterable["Completion"]:
-        if including_self:
+    def ancestors(
+        self, including_self: bool = False, reverse: bool = False
+    ) -> Iterable["Completion"]:
+        if not reverse and including_self:
             yield self
-        if not self.parent:
-            return
-        yield self.parent
-        yield from self.parent.ancestors()
+        if self.parent:
+            yield from self.parent.ancestors(including_self=True, reverse=reverse)
+        if reverse and including_self:
+            yield self
 
-    def descendants(self, including_self: bool = False) -> Iterable["Completion"]:
-        if including_self:
+    def descendants(
+        self, including_self: bool = False, model: Optional[str] = None
+    ) -> Iterable["Completion"]:
+        if including_self and (model is None or self.model == model):
             yield self
         for child in self.children:
-            yield child
-            yield from child.descendants()
+            yield from child.descendants(including_self=True, model=model)
 
-    def leaves(self) -> Iterable["Completion"]:
-        if not self.children:
+    def leaves(self, model: Optional[str] = None) -> Iterable["Completion"]:
+        if not self.children and (model is None or self.model == model):
             yield self
         for child in self.children:
-            yield from child.leaves()
+            yield from child.leaves(model=model)
 
     def message_params(
         self, replacement_token: Optional[str] = None
@@ -271,11 +278,11 @@ class Completion:
         yield from self.logprobs()
 
     def token_advantage(self, cache: bool = False) -> float:
-        return self.advantage(cache=cache) / (self._num_token_logprobs() or 1)
+        return self.advantage(cache=cache) / (self.num_token_logprobs() or 1)
 
     def token_advantages(self, cache: bool = False) -> Iterable[float]:
         advantage = self.advantage(cache=cache)
-        num_token_logprobs = self._num_token_logprobs()
+        num_token_logprobs = self.num_token_logprobs()
         token_advantage = advantage / max(num_token_logprobs, 1)
         return (token_advantage for _ in range(num_token_logprobs))
 
@@ -309,6 +316,49 @@ class Completion:
             self.parent.all_token_count(tokenizer) if self.parent else 0
         )
 
+    def tokens(
+        self, tokenizer: Tokenizer, *, replacement_token: Optional[str] = None
+    ) -> torch.Tensor:
+        return tokenizer.encode(
+            self.message_params(replacement_token=replacement_token),  # type: ignore
+            remove_bos=self.parent is not None,
+            first_message_is_continuation=(
+                self.parent is not None
+                and (
+                    role(self.parent.messages[-1])
+                    == role(self.messages[0])
+                    == "assistant"
+                )
+            ),
+        )
+
+    def sample_probability(
+        self, cache: bool = False, model: Optional[str] = None
+    ) -> float:
+        if cache and model in self._cached_sample_probabilities:
+            return self._cached_sample_probabilities[model]
+        if not self.sampleable(model):
+            probability = 0.0
+        elif not self.parent:
+            probability = 1.0
+        else:
+            probability = self.parent.sample_probability(
+                cache=cache, model=model
+            ) / sum(child.sampleable(model) for child in self.parent.children)
+        if cache:
+            self._cached_sample_probabilities[model] = probability
+        return probability
+
+    def sampleable(self, model: Optional[str]) -> bool:
+        return not self.model or not model or self.model == model
+
+    def sample_terminus(self, model: Optional[str] = None) -> "Completion":
+        children = [child for child in self.children if child.sampleable(model)]
+        if not children:
+            return self
+        else:
+            return random.choice(children).sample_terminus(model=model)
+
     def can_split(self, by: SplitMethod, separators: Optional[set[str]] = None) -> bool:
         positive_weights = 0
         for weight in self._split_weights(by, separators=separators):
@@ -338,7 +388,7 @@ class Completion:
         """
         split_weights = list(self._split_weights(by, separators=separators))
         assert (
-            separators is None or len(split_weights) == self._num_token_logprobs()
+            separators is None or len(split_weights) == self.num_token_logprobs()
         ), "Number of weights does not match number of tokens."
         if len(split_weights) < 2:
             return False
@@ -351,15 +401,6 @@ class Completion:
         assert split != 0, "Cannot split at start of completion."
         assert split != len(split_weights), "Cannot split at end of completion."
         assert split_weights[split] != 0, "Split point has zero weight."
-        # if separators is not None:
-        #     tokens = list(
-        #         token_logprob.token
-        #         for sequence in self._token_logprob_sequences()
-        #         for token_logprob in sequence
-        #     )
-        #     assert (
-        #         split_weights[split - 1] == 0
-        #     ), f"Split point ({tokens[split]}) is not after a separator ({tokens[split-1]}) or the weight ({split_weights[split-1]}) is not zero: {tokens}"
         i = 0
         for j, choice in enumerate(self.messages):
             if (
@@ -448,7 +489,7 @@ class Completion:
             and choice.logprobs.content
         )
 
-    def _num_token_logprobs(self) -> int:
+    def num_token_logprobs(self) -> int:
         return sum(len(sequence) for sequence in self._token_logprob_sequences())
 
     def __eq__(self, other: object) -> bool:
