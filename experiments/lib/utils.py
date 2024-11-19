@@ -1,6 +1,7 @@
 import black
 from collections import deque
-from typing import Iterable
+import torch
+from typing import Optional, Sequence
 
 
 def black_print(
@@ -64,3 +65,42 @@ def read_last_n_lines(filename: str, n: int) -> str:
             lines[0] = chunk[chunk.rindex("\n") + 1 :] + lines[0]
 
     return "\n".join(lines)
+
+
+def truncate_pad(
+    input: torch.Tensor,
+    shape: Sequence[int],
+    mode: str = "constant",
+    value: Optional[float] = None,
+) -> torch.Tensor:
+    """Truncates or pads a tensor to match the target shape.
+
+    For each dimension i, if shape[i] is:
+    - -1: Leave that dimension unchanged
+    - < input.shape[i]: Truncate to first shape[i] elements
+    - > input.shape[i]: Pad with value to reach shape[i] elements
+
+    Args:
+        input: Input tensor to reshape
+        shape: Target shape, with -1 indicating unchanged dimensions
+        mode: Padding mode to pass to torch.nn.functional.pad
+        value: Pad value to pass to torch.nn.functional.pad
+
+    Returns:
+        Tensor with dimensions matching shape (except where -1)
+    """
+    result = input
+    for i in range(len(shape)):
+        if shape[i] == -1:
+            continue
+        if shape[i] < input.shape[i]:
+            # Truncate on this dimension
+            slicing = [slice(None)] * len(input.shape)
+            slicing[i] = slice(0, shape[i])
+            result = result[tuple(slicing)]
+        elif shape[i] > input.shape[i]:
+            # Pad on this dimension
+            padding = [0] * (2 * len(input.shape))
+            padding[2 * i + 1] = shape[i] - input.shape[i]
+            result = torch.nn.functional.pad(result, padding, mode=mode, value=value)
+    return result
