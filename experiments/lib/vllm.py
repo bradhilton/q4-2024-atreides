@@ -9,7 +9,8 @@ import os
 import random
 import re
 import socket
-from typing import Any, Callable, Optional
+import sys
+from typing import Any, Callable, IO, Optional
 from uvicorn.config import LOGGING_CONFIG as UVICORN_LOGGING_CONFIG
 
 os.environ["VLLM_LOGGING_CONFIG_PATH"] = __file__.replace(
@@ -106,7 +107,7 @@ async def start_vllm(
     max_concurrent_requests: int = 128,
     **kwargs: Any,
 ) -> vLLM:
-    stdouterr = open("./logs/vllm.log", "a")
+    os.environ.pop("VLLM_LOGGING_CONFIG_PATH", None)
     args = [
         "vllm",
         "serve",
@@ -119,14 +120,33 @@ async def start_vllm(
     ]
     process = await asyncio.create_subprocess_exec(
         *args,
-        stdout=stdouterr,
-        stderr=stdouterr,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
         env={
             **os.environ,
             **(env or {}),
         },
     )
     print(f"$ {' '.join(args)}")
+    log_file = open(LOG_FILENAME, "a")
+    logging = True
+
+    async def log_output(stream: asyncio.StreamReader, io: IO[str]) -> None:
+        while True:
+            line = await stream.readline()
+            if not line:
+                break
+            decoded_line = line.decode()
+            if logging:
+                io.write(decoded_line)
+                io.flush()
+            log_file.write(decoded_line)
+            log_file.flush()
+
+    if process.stdout:
+        asyncio.create_task(log_output(process.stdout, sys.stdout))
+    if process.stderr:
+        asyncio.create_task(log_output(process.stderr, sys.stderr))
     client = AsyncOpenAI(
         api_key="default",
         base_url=f"http://{kwargs.get('host', '0.0.0.0')}:{kwargs.get('port', 8000)}/v1",
@@ -151,6 +171,8 @@ async def start_vllm(
                 process.terminate()
                 raise TimeoutError("vLLM server did not start in time")
             continue
+    logging = False
+    print(f"vLLM server started succesfully. Logs can be found at {LOG_FILENAME}")
     return vLLM(client, process)
 
 
