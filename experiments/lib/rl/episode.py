@@ -1,11 +1,57 @@
 import asyncio
+from dataclasses import dataclass
 from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
-from typing import Any, Callable, Coroutine, Literal, Optional, Protocol
+from openai.types.chat.chat_completion_assistant_message_param import (
+    ChatCompletionAssistantMessageParam,
+)
+from typing import (
+    Any,
+    Callable,
+    Coroutine,
+    Literal,
+    Optional,
+    overload,
+    Protocol,
+    Sequence,
+)
 
 from .completion import Completion, SplitMethod
 from .completion_sampler import CompletionSampler
 
 from ..tokenizer import Tokenizer
+
+
+@dataclass
+class EpisodeCompletion:
+    _completion: Completion
+    _sampler: CompletionSampler
+
+    @property
+    def last_assistant_message(self) -> ChatCompletionAssistantMessageParam:
+        return self._completion.message_params()[-1]  # type: ignore
+
+    @property
+    def messages(self) -> list[ChatCompletionMessageParam]:
+        return self._completion.all_message_params()
+
+    @property
+    def reward(self) -> float:
+        return self._completion.reward
+
+    @reward.setter
+    def reward(self, value: float) -> None:
+        self._completion.reward = value
+
+    def commit(self, reward: Optional[float] = None) -> None:
+        self._completion.commit(reward)
+
+    async def follow_up(
+        self, messages: list[ChatCompletionMessageParam]
+    ) -> "EpisodeCompletion":
+        completions = await self._sampler.sample_completions(
+            Completion(parent=self._completion, messages=messages)
+        )
+        return EpisodeCompletion(_completion=completions[0], _sampler=self._sampler)
 
 
 class SampleEpisode(Protocol):
@@ -16,7 +62,9 @@ class Episode:
     def __init__(
         self,
         messages: list[ChatCompletionMessageParam],
-        on_sample: Callable[[list[Completion]], None | Coroutine[None, None, None]],
+        on_sample: Callable[
+            [list[EpisodeCompletion]], None | Coroutine[None, None, None]
+        ],
         get_easier_episode: Optional[tuple[float, SampleEpisode]] = None,
         get_similar_episode: Optional[SampleEpisode] = None,
         get_harder_episode: Optional[tuple[float, SampleEpisode]] = None,
@@ -144,6 +192,7 @@ class Episode:
         parents = self._get_sampleable_parents(
             max_parallel_splits,
             model,
+            branch_factor > 1,
             split_by,
             split_separators,
         )
@@ -169,12 +218,15 @@ class Episode:
         self,
         max_parallel_splits: int,
         model: str,
+        split: bool,
         split_method: SplitMethod,
         split_separators: Optional[set[str]],
     ) -> list[Completion]:
         if not any(child.model == model for child in self.completion.children):
             return [self.completion]
-        return sorted(
+        if not split:
+            return []
+        parents = sorted(
             (
                 c
                 for c in self.completion.descendants(model=model)
@@ -185,6 +237,11 @@ class Episode:
             * c.sample_probability(model=model),
             reverse=True,
         )[:max_parallel_splits]
+        for parent in parents:
+            assert parent.split(
+                by=split_method, separators=split_separators
+            ), "Unable to split completion"
+        return parents
 
     async def _sample_completions(
         self,
@@ -208,7 +265,12 @@ class Episode:
             for completion in completions:
                 completion.weight *= fork_decay
                 completion.fork = True
-        on_sample = self.on_sample(completions)
+        on_sample = self.on_sample(
+            [
+                EpisodeCompletion(completion, completion_sampler)
+                for completion in completions
+            ]
+        )
         if isinstance(on_sample, Coroutine):
             await on_sample
         return True

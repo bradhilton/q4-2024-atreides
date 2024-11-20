@@ -40,6 +40,7 @@ class Trainer:
         tqdm: Optional[type[tqdm]] = None,
         vllm_env: Optional[dict[str, str]] = None,
         vllm_kwargs: Optional[dict[str, Any]] = None,
+        vllm_max_concurrent_requests: int = 128,
         vllm_timeout: float = 120.0,
     ) -> None:
         self.models = [base_model]
@@ -65,6 +66,7 @@ class Trainer:
         self.vllm_kwargs = vllm_kwargs or {}
         self.vllm_kwargs["env"] = vllm_env
         self.vllm_kwargs["timeout"] = vllm_timeout
+        self.vllm_max_concurrent_requests = vllm_max_concurrent_requests
         self._vllm_task: Optional[asyncio.Task[vLLM]] = None
         self._completion_sampler: Optional[CompletionSampler] = None
         self.tokenizer = Tokenizer(base_model)
@@ -82,15 +84,15 @@ class Trainer:
 
     async def eval(
         self, split: Literal["val", "test"], pbar_position: Optional[int] = None
-    ) -> None:
-        pbar = (
-            self.tqdm(desc=split, total=0, position=pbar_position)
-            if self.tqdm
-            else None
-        )
+    ) -> Optional[float]:
         if self.eval_episodes[split] is None:
             return
         completion_sampler = await self.completion_sampler()
+        pbar = (
+            self.tqdm(desc=split, total=1, unit="episode", position=pbar_position)
+            if self.tqdm
+            else None
+        )
         tasks: list[asyncio.Task] = []
         episodes: list[Episode] = []
         async for episode in iter(self.eval_episodes[split] or ()):
@@ -101,10 +103,12 @@ class Trainer:
                     branch_factor=self.eval_samples_per_episode[split],
                 )
             )
-            if pbar:
+            if pbar is not None:
                 pbar.total += 1
             task.add_done_callback(lambda _: pbar.update(1) if pbar else None)
             tasks.append(task)
+        if pbar is not None:
+            pbar.total = len(episodes)
         self.eval_episodes[split] = episodes
         await asyncio.gather(*tasks)
         score = sum(
@@ -119,9 +123,10 @@ class Trainer:
             ),
             1,
         )
-        if pbar:
+        if pbar is not None:
             pbar.set_postfix(avg=score)
         self.eval_scores[split][self.model] = score
+        return score
 
     async def explore(self, pbar_position: Optional[int] = None) -> list[Episode]:
         pbar = (
@@ -216,13 +221,19 @@ class Trainer:
             return self._completion_sampler
         vllm = await self.vllm()
         self._completion_sampler = CompletionSampler(
-            vllm.client, max_concurrent_requests=128, model=self.model
+            vllm.client,
+            max_concurrent_requests=self.vllm_max_concurrent_requests,
+            model=self.model,
         )
         return self._completion_sampler
 
     async def vllm(self) -> vLLM:
         if not self._vllm_task:
             self._vllm_task = asyncio.create_task(
-                start_vllm(self.model, **self.vllm_kwargs)
+                start_vllm(
+                    self.model,
+                    max_concurrent_requests=self.vllm_max_concurrent_requests,
+                    **self.vllm_kwargs,
+                )
             )
         return await self._vllm_task

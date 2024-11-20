@@ -34,6 +34,7 @@ from typing import (
     Optional,
     Self,
     Required,
+    Sequence,
     TypeAlias,
     Union,
 )
@@ -66,7 +67,7 @@ class Completion:
     def __init__(
         self,
         parent: Optional["Completion"] = None,
-        messages: Optional[list[Union[ChatCompletionMessageParam, Choice]]] = None,
+        messages: Optional[Sequence[Union[ChatCompletionMessageParam, Choice]]] = None,
         reward: float = 0.0,
         children: Optional[set["Completion"]] = None,
         weight: float = 1.0,
@@ -74,7 +75,7 @@ class Completion:
         fork: bool = False,
     ):
         self.parent = parent
-        self.messages = messages or []
+        self.messages = list(messages or [])
         self.reward = reward
         self.children = children or set()
         self.weight = weight

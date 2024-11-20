@@ -103,29 +103,38 @@ async def start_vllm(
     model: str,
     timeout: float = 120.0,
     env: Optional[dict[str, str]] = None,
+    max_concurrent_requests: int = 128,
     **kwargs: Any,
 ) -> vLLM:
-    process = await asyncio.create_subprocess_exec(
+    stdouterr = open("./logs/vllm.log", "a")
+    args = [
         "vllm",
         "serve",
         model,
         *[
-            f"--{key.replace('_', '-')}{f'=={value}' if value != True else ''}"
+            f"--{key.replace('_', '-')}{f'={value}' if value != True else ''}"
             for key, value in kwargs.items()
         ],
-        "--api-key==default",
-        stdout=open("./logs/vllm.log", "w"),
-        stderr=open("./logs/vllm.log", "a"),
+        "--api-key=default",
+    ]
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=stdouterr,
+        stderr=stdouterr,
         env={
             **os.environ,
             **(env or {}),
         },
     )
+    print(f"$ {' '.join(args)}")
     client = AsyncOpenAI(
         api_key="default",
         base_url=f"http://{kwargs.get('host', '0.0.0.0')}:{kwargs.get('port', 8000)}/v1",
         http_client=DefaultAsyncHttpxClient(
-            limits=httpx.Limits(max_connections=1024, max_keepalive_connections=128)
+            limits=httpx.Limits(
+                max_connections=max_concurrent_requests * 4,
+                max_keepalive_connections=max_concurrent_requests,
+            )
         ),
     )
     start = asyncio.get_event_loop().time()
