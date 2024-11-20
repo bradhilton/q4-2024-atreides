@@ -4,12 +4,14 @@ from aioitertools.helpers import maybe_await
 import asyncio
 import math
 from tqdm import tqdm
+from tqdm.notebook import tqdm_notebook
 from typing import (
     Any,
     AsyncIterable,
     Iterable,
     Literal,
     Optional,
+    overload,
     Union,
 )
 
@@ -37,7 +39,6 @@ class Trainer:
         test_samples_per_episode: int = 1,
         tune_episode_sample_fraction: float = 1.0,
         tune_sequence_length: int = 8192,
-        tqdm: Optional[type[tqdm]] = None,
         vllm_env: Optional[dict[str, str]] = None,
         vllm_kwargs: Optional[dict[str, Any]] = None,
         vllm_max_concurrent_requests: int = 128,
@@ -62,7 +63,6 @@ class Trainer:
         self.eval_scores: dict[str, dict[str, float]] = {"val": {}, "test": {}}
         self.tune_episode_sample_fraction = tune_episode_sample_fraction
         self.tune_sequence_length = tune_sequence_length
-        self.tqdm = tqdm
         self.vllm_kwargs = vllm_kwargs or {}
         self.vllm_kwargs["env"] = vllm_env
         self.vllm_kwargs["timeout"] = vllm_timeout
@@ -71,6 +71,11 @@ class Trainer:
         self._completion_sampler: Optional[CompletionSampler] = None
         self.tokenizer = Tokenizer(base_model)
         self._substitute_episodes: dict[Episode, Episode] = {}
+        try:
+            get_ipython  # type: ignore
+            self.tqdm = tqdm_notebook
+        except NameError:
+            self.tqdm = tqdm
 
     @property
     def model(self) -> str:
@@ -78,23 +83,73 @@ class Trainer:
 
     async def train(self, iterations: int) -> None:
         for _ in range(iterations):
-            _, episodes = await asyncio.gather(self.eval("val", 0), self.explore(1))
+            val_score, episodes = await asyncio.gather(
+                self.eval("val", 0), self.explore(1)
+            )
             await self.tune(episodes)
-        await asyncio.gather(self.eval("val", 0), self.eval("test", 1))
+        val_score, test_score = await asyncio.gather(
+            self.eval("val", 0), self.eval("test", 1)
+        )
+
+    @overload
+    async def eval(
+        self,
+        split: Literal["val", "test"],
+        pbar_position: Optional[int] = None,
+        *,
+        return_exceptions: Literal[False] = False,
+    ) -> Optional[float]: ...
+
+    @overload
+    async def eval(
+        self,
+        split: Literal["val", "test"],
+        pbar_position: Optional[int] = None,
+        *,
+        return_exceptions: Literal[True] = True,
+    ) -> tuple[Optional[float], list[Exception]]: ...
 
     async def eval(
-        self, split: Literal["val", "test"], pbar_position: Optional[int] = None
-    ) -> Optional[float]:
+        self,
+        split: Literal["val", "test"],
+        pbar_position: Optional[int] = None,
+        *,
+        return_exceptions: bool = False,
+    ) -> Union[Optional[float], tuple[Optional[float], list[Exception]]]:
         if self.eval_episodes[split] is None:
-            return
+            if return_exceptions:
+                return None, []
+            return None
         completion_sampler = await self.completion_sampler()
-        pbar = (
-            self.tqdm(desc=split, total=1, unit="episode", position=pbar_position)
-            if self.tqdm
-            else None
-        )
+        pbar = self.tqdm(desc=split, total=1, unit="episode", position=pbar_position)
         tasks: list[asyncio.Task] = []
         episodes: list[Episode] = []
+        exceptions: list[Exception] = []
+
+        def get_score() -> float:
+            return sum(
+                episode.completion.value(cache=True, model=self.model)
+                for episode in episodes
+            ) / max(
+                sum(
+                    1
+                    for episode in episodes
+                    if any(
+                        child.model == self.model
+                        for child in episode.completion.children
+                    )
+                ),
+                1,
+            )
+
+        def done_callback(task: asyncio.Task[bool]) -> None:
+            pbar.update(1)
+            try:
+                task.result()
+            except Exception as exception:
+                exceptions.append(exception)
+            pbar.set_postfix(avg=get_score(), exceptions=len(exceptions))
+
         async for episode in iter(self.eval_episodes[split] or ()):
             episodes.append(episode)
             task = asyncio.create_task(
@@ -103,43 +158,41 @@ class Trainer:
                     branch_factor=self.eval_samples_per_episode[split],
                 )
             )
-            if pbar is not None:
-                pbar.total += 1
-            task.add_done_callback(lambda _: pbar.update(1) if pbar else None)
+            task.add_done_callback(done_callback)
             tasks.append(task)
-        if pbar is not None:
-            pbar.total = len(episodes)
+            pbar.total += 1
+        pbar.total = len(episodes)
         self.eval_episodes[split] = episodes
         await asyncio.gather(*tasks)
-        score = sum(
-            episode.completion.value(model=self.model) for episode in episodes
-        ) / max(
-            sum(
-                1
-                for episode in episodes
-                if any(
-                    child.model == self.model for child in episode.completion.children
-                )
-            ),
-            1,
-        )
-        if pbar is not None:
-            pbar.set_postfix(avg=score)
-        self.eval_scores[split][self.model] = score
+        score = get_score()
+        self.eval_scores[split][self.model] = get_score()
+        if return_exceptions:
+            return score, exceptions
         return score
 
-    async def explore(self, pbar_position: Optional[int] = None) -> list[Episode]:
-        pbar = (
-            self.tqdm(
-                desc="explore",
-                total=self.episodes_per_iteration,
-                unit="episode",
-                position=pbar_position,
-            )
-            if self.tqdm
-            else None
+    @overload
+    async def explore(
+        self, pbar_position: Optional[int] = None, *, return_exceptions: Literal[True]
+    ) -> tuple[list[Episode], list[Exception]]: ...
+
+    @overload
+    async def explore(
+        self,
+        pbar_position: Optional[int] = None,
+        *,
+        return_exceptions: Literal[False] = False,
+    ) -> list[Episode]: ...
+
+    async def explore(
+        self, pbar_position: Optional[int] = None, *, return_exceptions: bool = False
+    ) -> Union[list[Episode], tuple[list[Episode], list[Exception]]]:
+        pbar = self.tqdm(
+            desc="explore",
+            total=self.episodes_per_iteration,
+            unit="episode",
+            position=pbar_position,
         )
-        tasks: list[asyncio.Task] = []
+        tasks: list[asyncio.Task[Episode]] = []
         async for episode in ait.islice(
             self._train_iterator, self.episodes_per_iteration
         ):
@@ -151,9 +204,19 @@ class Trainer:
                 self._train_iterator = ait.chain([episode], self._train_iterator)
                 break
             tasks.append(asyncio.create_task(self._explore_episode(episode, pbar)))
-        return await asyncio.gather(*tasks)
+        episodes: list[Episode] = []
+        exceptions: list[Exception] = []
+        for future in asyncio.as_completed(tasks):
+            try:
+                episode = await future
+                episodes.append(episode)
+            except Exception as exception:
+                exceptions.append(exception)
+        if return_exceptions:
+            return episodes, exceptions
+        return episodes
 
-    async def _explore_episode(self, episode: Episode, pbar: Optional[tqdm]) -> Episode:
+    async def _explore_episode(self, episode: Episode, pbar: tqdm) -> Episode:
         if episode in self._substitute_episodes:
             return await self._explore_episode(self._substitute_episodes[episode], pbar)
         completion_sampler = await self.completion_sampler()
@@ -162,7 +225,7 @@ class Trainer:
             self.samples_per_episode - episode.num_samples(model=self.model), 0
         ):
             _frac = remaining_samples / self.samples_per_episode
-            if pbar and frac:
+            if frac:
                 pbar.update(frac - _frac)
             frac = _frac
             if not await episode.sample_completions_v2(
@@ -196,8 +259,7 @@ class Trainer:
                     continue
                 self._substitute_episodes[episode] = substitute
                 return await self._explore_episode(substitute, pbar)
-        if pbar:
-            pbar.update(frac or 0)
+        pbar.update(frac or 0)
         return episode
 
     async def tune(self, episodes: list[Episode]) -> None:
