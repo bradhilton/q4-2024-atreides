@@ -44,9 +44,11 @@ def packed_tensors(
     with Timer("Prepared tensors"):
         completion_tensors = {
             completion: get_completion_tensors(
-                completion, weight, tokenizer, max_ancestors
+                completion, prev_completion, weight, tokenizer, max_ancestors
             )
-            for completion, weight in completion_weights.items()
+            for (completion, weight), prev_completion in zip(
+                completion_weights.items(), [None] + list(completion_weights.keys())
+            )
         }
         tensors = {
             key: torch.stack(
@@ -161,6 +163,7 @@ def packed_sequences(
 
 def get_completion_tensors(
     completion: Completion,
+    prev_completion: Optional[Completion],
     weight: float,
     tokenizer: Tokenizer,
     max_ancestors: int,
@@ -179,6 +182,9 @@ def get_completion_tensors(
     )
     logprobs = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
     logprobs[mask] = torch.tensor([logprob for logprob in completion.logprobs()])
+    # if not prev_completion is completion.parent:
+    if True:
+        advantages[0] = logprobs[0] = torch.nan
     ancestor_ids = [
         id(ancestor) for ancestor in completion.ancestors(including_self=True)
     ]
