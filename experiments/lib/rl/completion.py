@@ -83,6 +83,7 @@ class Completion:
         self.fork = fork
         self._cached_values: dict[tuple[Optional[str], Optional[bool]], float] = {}
         self._cached_sample_probabilities: dict[Optional[str], float] = {}
+        self._cached_tokens: Optional[torch.Tensor] = None
         for child in self.children:
             if child.parent is not self:
                 raise ValueError("Child completion's parent must be this completion.")
@@ -292,35 +293,44 @@ class Completion:
             yield from self.parent.all_token_advantages(cache=cache)
         yield from self.token_advantages(cache=cache)
 
-    def token_count(self, tokenizer: Tokenizer) -> int:
-        if not self.messages:
-            return 0
-        token_count = sum(
-            message_token_count(message, tokenizer) for message in self.messages
-        )
-        join_parent = (
-            self.parent
-            and self.parent.messages
-            and not (
-                role(self.parent.messages[-1]) == role(self.messages[0]) == "assistant"
-            )
-        )
-        token_count += tokenizer.join_token_count * max(
-            0, len(self.messages) - (0 if join_parent else 1)
-        )
-        if not self.parent:
-            token_count += tokenizer.prefix_token_count
-        return token_count
+    # def token_count(self, tokenizer: Tokenizer) -> int:
+    #     if not self.messages:
+    #         return 0
+    #     token_count = sum(
+    #         message_token_count(message, tokenizer) for message in self.messages
+    #     )
+    #     join_parent = (
+    #         self.parent
+    #         and self.parent.messages
+    #         and not (
+    #             role(self.parent.messages[-1]) == role(self.messages[0]) == "assistant"
+    #         )
+    #     )
+    #     token_count += tokenizer.join_token_count * max(
+    #         0, len(self.messages) - (0 if join_parent else 1)
+    #     )
+    #     if not self.parent:
+    #         token_count += tokenizer.prefix_token_count
+    #     return token_count
 
-    def all_token_count(self, tokenizer: Tokenizer) -> int:
-        return self.token_count(tokenizer) + (
-            self.parent.all_token_count(tokenizer) if self.parent else 0
+    def token_count(self, tokenizer: Tokenizer, *, cache: bool = False) -> int:
+        return self.tokens(tokenizer, cache=cache).size(0)
+
+    def all_token_count(self, tokenizer: Tokenizer, *, cache: bool) -> int:
+        return self.token_count(tokenizer, cache=cache) + (
+            self.parent.all_token_count(tokenizer, cache=cache) if self.parent else 0
         )
 
     def tokens(
-        self, tokenizer: Tokenizer, *, replacement_token: Optional[str] = None
+        self,
+        tokenizer: Tokenizer,
+        *,
+        cache: bool = False,
+        replacement_token: Optional[str] = None,
     ) -> torch.Tensor:
-        return tokenizer.encode(
+        if cache and self._cached_tokens is not None and replacement_token is None:
+            return self._cached_tokens
+        tokens = tokenizer.encode(
             self.message_params(replacement_token=replacement_token),  # type: ignore
             remove_bos=self.parent is not None,
             first_message_is_continuation=(
@@ -332,6 +342,9 @@ class Completion:
                 )
             ),
         )
+        if cache and replacement_token is None:
+            self._cached_tokens = tokens
+        return tokens
 
     def sample_probability(
         self, cache: bool = False, model: Optional[str] = None
@@ -450,6 +463,7 @@ class Completion:
                 self.messages = self.messages[: j + 1]
                 self.reward = 0.0
                 self.children = {child}
+                self._cached_tokens = None
                 return True
         return False
 

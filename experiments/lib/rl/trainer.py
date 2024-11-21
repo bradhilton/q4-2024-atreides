@@ -17,7 +17,7 @@ from typing import (
 
 from .completion_sampler import CompletionSampler
 from .episode import Episode
-from .pack import packed_tensors
+from .pack import packed_tensors, PackedTensors
 from ..tokenizer import Tokenizer
 from ..vllm import start_vllm, vLLM
 
@@ -121,7 +121,13 @@ class Trainer:
                 return None, []
             return None
         completion_sampler = await self.completion_sampler()
-        pbar = self.tqdm(desc=split, total=1, unit="episode", position=pbar_position)
+        pbar = self.tqdm(
+            desc=split,
+            total=getattr(self.eval_episodes[split], "__len__", lambda: None)(),
+            unit="episode",
+            dynamic_ncols=True,
+            position=pbar_position,
+        )
         tasks: list[asyncio.Task] = []
         episodes: list[Episode] = []
         exceptions: list[Exception] = []
@@ -160,10 +166,11 @@ class Trainer:
             )
             task.add_done_callback(done_callback)
             tasks.append(task)
-            pbar.total += 1
         pbar.total = len(episodes)
+        pbar.refresh()
         self.eval_episodes[split] = episodes
         await asyncio.gather(*tasks)
+        pbar.close()
         score = get_score()
         self.eval_scores[split][self.model] = get_score()
         if return_exceptions:
@@ -186,13 +193,17 @@ class Trainer:
     async def explore(
         self, pbar_position: Optional[int] = None, *, return_exceptions: bool = False
     ) -> Union[list[Episode], tuple[list[Episode], list[Exception]]]:
+        await self.completion_sampler()
         pbar = self.tqdm(
             desc="explore",
             total=self.episodes_per_iteration,
             unit="episode",
+            dynamic_ncols=True,
             position=pbar_position,
         )
+        pbar.set_postfix(exceptions=0)
         tasks: list[asyncio.Task[Episode]] = []
+        num_episodes: int = 0
         async for episode in ait.islice(
             self._train_iterator, self.episodes_per_iteration
         ):
@@ -203,8 +214,14 @@ class Trainer:
             ):
                 self._train_iterator = ait.chain([episode], self._train_iterator)
                 break
-            tasks.append(asyncio.create_task(self._explore_episode(episode, pbar)))
-        episodes: list[Episode] = []
+            num_episodes += 1
+            task = asyncio.create_task(self._explore_episode(episode, pbar))
+            tasks.append(task)
+        if self.episodes_per_iteration is None:
+            self.episodes_per_iteration = num_episodes
+            pbar.total = num_episodes
+            pbar.refresh()
+        episodes = []
         exceptions: list[Exception] = []
         for future in asyncio.as_completed(tasks):
             try:
@@ -212,6 +229,9 @@ class Trainer:
                 episodes.append(episode)
             except Exception as exception:
                 exceptions.append(exception)
+                pbar.set_postfix(exceptions=len(exceptions))
+        pbar.n = len(episodes)
+        pbar.close()
         if return_exceptions:
             return episodes, exceptions
         return episodes
@@ -262,11 +282,11 @@ class Trainer:
         pbar.update(frac or 0)
         return episode
 
-    async def tune(self, episodes: list[Episode]) -> None:
-        vllm = await self.vllm()
-        vllm.process.terminate()
-        self._vllm_task, self._completion_sampler = None, None
-        tensors = packed_tensors(
+    async def tune(self, episodes: list[Episode]) -> PackedTensors:
+        # vllm = await self.vllm()
+        # vllm.process.terminate()
+        # self._vllm_task, self._completion_sampler = None, None
+        return packed_tensors(
             episodes,
             model=self.model,
             sequence_length=self.tune_sequence_length,

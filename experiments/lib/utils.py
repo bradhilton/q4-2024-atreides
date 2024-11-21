@@ -99,8 +99,8 @@ def truncate_pad(
             slicing[i] = slice(0, shape[i])
             result = result[tuple(slicing)]
         elif shape[i] > input.shape[i]:
-            # Pad on this dimension
+            # Start of Selection
             padding = [0] * (2 * len(input.shape))
-            padding[2 * i + 1] = shape[i] - input.shape[i]
+            padding[2 * (len(input.shape) - i - 1) + 1] = shape[i] - input.shape[i]
             result = torch.nn.functional.pad(result, padding, mode=mode, value=value)
     return result

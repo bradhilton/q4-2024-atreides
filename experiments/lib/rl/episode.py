@@ -28,7 +28,11 @@ class EpisodeCompletion:
 
     @property
     def last_assistant_message(self) -> ChatCompletionAssistantMessageParam:
-        return self._completion.message_params()[-1]  # type: ignore
+        return next(
+            message
+            for message in reversed(self._completion.all_message_params())
+            if message["role"] == "assistant"
+        )
 
     @property
     def messages(self) -> list[ChatCompletionMessageParam]:

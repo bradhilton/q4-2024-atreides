@@ -15,6 +15,8 @@ class PackedTensors(TypedDict):
     weights: torch.Tensor
     ids: torch.Tensor
     parent_ids: torch.Tensor
+    ancestor_ids: torch.Tensor
+    pos_ids: torch.Tensor
 
 
 def packed_tensors(
@@ -27,19 +29,19 @@ def packed_tensors(
     sequences, completion_weights = packed_sequences(
         episodes, model, sequence_length, trajectories_per_episode, tokenizer
     )
+    all_token_count_cache = {}
     completion_tensors = {
-        completion: get_completion_tensors(completion, weight, tokenizer)
+        completion: get_completion_tensors(
+            completion, weight, tokenizer, all_token_count_cache
+        )
         for completion, weight in completion_weights.items()
     }
     return {
-        key: torch.cat(
+        key: torch.stack(
             [
                 truncate_pad(
                     torch.cat(
-                        [
-                            completion_tensors[completion]["tokens"]
-                            for completion in sequence
-                        ]
+                        [completion_tensors[completion][key] for completion in sequence]
                     ),
                     [sequence_length],
                     value=pad_value,
@@ -54,6 +56,8 @@ def packed_tensors(
             "weights": 0.0,
             "ids": 0,
             "parent_ids": 0,
+            "ancestor_ids": 0,
+            "pos_ids": 0,
         }.items()
     }  # type: ignore
 
@@ -80,7 +84,7 @@ def packed_sequences(
             for terminus in terminus.ancestors(including_self=True):
                 if (
                     terminus.advantage(cache=True, model=model) != 0
-                    and terminus.all_token_count(tokenizer) <= sequence_length
+                    and len(terminus.tokens(tokenizer, cache=True)) <= sequence_length
                 ):
                     break
             termini.append(terminus)
@@ -89,15 +93,16 @@ def packed_sequences(
                 for completion in terminus.ancestors(including_self=True, reverse=True):
                     completions[completion] += 1
                     if (
-                        sum(c.token_count(tokenizer) for c in completions)
+                        sum(c.token_count(tokenizer, cache=True) for c in completions)
                         > sequence_length
                     ):
                         for c in completion.ancestors(including_self=True):
                             completions[c] -= 1
                         sequences.append(completions)
                         completions = Counter()
-                    else:
                         break
+                else:
+                    break
     sequences.append(completions)
     total_occurances = sum(sequences, Counter())
     sequence_occurences = Counter(
@@ -126,13 +131,18 @@ def packed_sequences(
 
 
 def get_completion_tensors(
-    completion: Completion, weight: float, tokenizer: Tokenizer
+    completion: Completion,
+    weight: float,
+    tokenizer: Tokenizer,
+    all_token_count_cache: dict[Completion, int],
 ) -> PackedTensors:
-    tokens = completion.tokens(tokenizer)
-    replacement_token = get_replacement_token(tokens, tokenizer)
+    tokens = completion.tokens(tokenizer, cache=True)
+    # replacement_token, replacement_token_id = get_replacement_token(tokens, tokenizer)
+    # Hard coding this for now
+    replacement_token, replacement_token_id = "<|reserved_special_token_250|>", 128255
     mask = (
         completion.tokens(tokenizer, replacement_token=replacement_token)
-        == replacement_token
+        == replacement_token_id
     )
     advantages = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
     advantages[mask] = torch.tensor(
@@ -140,6 +150,20 @@ def get_completion_tensors(
     )
     logprobs = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
     logprobs[mask] = torch.tensor([logprob for logprob in completion.logprobs()])
+    ancestor_ids = [
+        id(ancestor) for ancestor in completion.ancestors(including_self=True)
+    ]
+    max_depth = 10
+    ancestor_ids += [ancestor_ids[-1]] * (max_depth - len(ancestor_ids))
+    if completion.parent:
+        if completion.parent in all_token_count_cache:
+            start_pos_id = all_token_count_cache[completion.parent]
+        else:
+            start_pos_id = all_token_count_cache[completion.parent] = (
+                completion.parent.all_token_count(tokenizer, cache=True)
+            )
+    else:
+        start_pos_id = 0
     return {
         "tokens": tokens,
         "advantages": advantages,
@@ -147,21 +171,30 @@ def get_completion_tensors(
         "weights": torch.tensor([weight for _ in range(tokens.shape[0])]),
         "ids": torch.tensor([id(completion) for _ in range(tokens.shape[0])]),
         "parent_ids": torch.tensor(
-            [id(completion.parent) for _ in range(tokens.shape[0])]
+            [
+                id(completion.parent) if completion.parent else id(completion)
+                for _ in range(tokens.shape[0])
+            ]
+        ),
+        "ancestor_ids": torch.tensor([ancestor_ids for _ in range(tokens.shape[0])]),
+        "pos_ids": torch.tensor(
+            [i for i in range(start_pos_id, tokens.shape[0] + start_pos_id)]
         ),
     }
 
 
-def get_replacement_token(tokens: torch.Tensor, tokenizer: Tokenizer) -> str:
+def get_replacement_token(
+    tokens: torch.Tensor, tokenizer: Tokenizer
+) -> tuple[str, int]:
     max_token = int(tokens.max().item())
     try:
-        return tokenizer.get_token(max_token + 1)
+        return tokenizer.get_token(max_token + 1), max_token + 1
     except:
         for i in range(max_token - 1, 0, -1):
             if i in tokens:
                 continue
             try:
-                return tokenizer.get_token(i)
+                return tokenizer.get_token(i), i
             except:
                 continue
     raise ValueError("No replacement token found")
