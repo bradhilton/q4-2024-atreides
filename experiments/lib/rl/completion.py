@@ -352,6 +352,8 @@ class Completion:
                     == "assistant"
                 )
             ),
+            continue_final_message=role(self.messages[-1]) == "assistant"
+            and any(role(child.messages[0]) == "assistant" for child in self.children),
         )
         if cache and replacement_token is None:
             self._cached_tokens = tokens
