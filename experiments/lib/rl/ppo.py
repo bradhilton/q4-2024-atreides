@@ -179,6 +179,37 @@ class PPOLoss(nn.Module):
         # Calculate new log probabilities of the taken actions
         new_logprobs = dist.log_prob(tokens)  # Shape: (batch_size * sequence_length,)
 
+        # Debugging
+        if True:
+            # Shape: (batch_size * sequence_length,)
+            kl_divergence = torch.nn.functional.kl_div(
+                new_logprobs, logprobs, reduction="none", log_target=True
+            )
+            # Debugging KL divergence distribution
+            import matplotlib.pyplot as plt
+            import numpy as np
+
+            # Convert to numpy and remove NaN values
+            kl_np = kl_divergence.detach().cpu().numpy()
+
+            # Create line plot
+            plt.figure(figsize=(10, 6))
+            plt.plot(kl_np, linewidth=2)
+            plt.xlabel("Token Index")
+            plt.ylabel("KL Divergence")
+            plt.title("KL Divergence Across Tokens")
+            plt.grid(True, alpha=0.3)
+            plt.show()
+
+            # Find first token with KL divergence > 1
+            high_kl_idx = (kl_np > 1).nonzero()[0]
+            if len(high_kl_idx) > 0:
+                print(f"First token with KL divergence > 1: {high_kl_idx[0]}")
+            else:
+                print("No tokens found with KL divergence > 1")
+
+            raise ValueError("KL Divergence Debugging")
+
         # Calculate entropy for each token
         entropy = dist.entropy()  # Shape: (batch_size * sequence_length,)
 

@@ -59,8 +59,17 @@ class Tokenizer:
         def patch(
             prompts: list[dict[str, str]], *args: object, **kwargs: object
         ) -> list[list[int]]:
+            # print(
+            #     prompts[0]["prompt"]
+            #     .removeprefix("<|begin_of_text|>")
+            #     .removesuffix("<|im_end|>")
+            # )
             return [
-                tokenizer.encode(prompt["prompt"].removeprefix("<|begin_of_text|>"))[
+                tokenizer.encode(
+                    prompt["prompt"]
+                    .removeprefix("<|begin_of_text|>")
+                    .replace("<|im_end|><|im_end|>", "<|im_end|>")
+                )[
                     (
                         self.prefix_token_count
                         if first_message_is_continuation

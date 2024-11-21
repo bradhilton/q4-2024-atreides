@@ -129,6 +129,10 @@ def packed_sequences(
                 else:
                     break
     sequences.append(completions)
+    for completions in sequences:
+        for completion, count in list(completions.items()):
+            if count == 0:
+                del completions[completion]
     total_occurances = sum(sequences, Counter())
     sequence_occurences = Counter(
         completion for completions in sequences for completion in completions
