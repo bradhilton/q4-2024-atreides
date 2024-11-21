@@ -191,7 +191,9 @@ class Completion:
     def all_abs_advantage_per_token(
         self, tokenizer: Tokenizer, cache: bool = False
     ) -> float:
-        return self.all_abs_advantage(cache=cache) / self.all_token_count(tokenizer)
+        return self.all_abs_advantage(cache=cache) / self.all_token_count(
+            tokenizer, cache=cache
+        )
 
     def ancestors(
         self, including_self: bool = False, reverse: bool = False
@@ -216,6 +218,15 @@ class Completion:
             yield self
         for child in self.children:
             yield from child.leaves(model=model)
+
+    def depths(self, depth: int = 0, model: Optional[str] = None) -> Iterable[int]:
+        if model is None or self.model == model:
+            yield depth
+        for child in self.children:
+            yield from child.depths(depth + 1, model=model)
+
+    def max_depth(self, model: Optional[str] = None) -> int:
+        return max(self.depths(model=model), default=0)
 
     def message_params(
         self, replacement_token: Optional[str] = None
@@ -316,7 +327,7 @@ class Completion:
     def token_count(self, tokenizer: Tokenizer, *, cache: bool = False) -> int:
         return self.tokens(tokenizer, cache=cache).size(0)
 
-    def all_token_count(self, tokenizer: Tokenizer, *, cache: bool) -> int:
+    def all_token_count(self, tokenizer: Tokenizer, *, cache: bool = False) -> int:
         return self.token_count(tokenizer, cache=cache) + (
             self.parent.all_token_count(tokenizer, cache=cache) if self.parent else 0
         )

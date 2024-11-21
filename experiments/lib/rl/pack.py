@@ -1,11 +1,12 @@
 from collections import Counter
 import torch
+from torch.utils.data import Dataset
 from typing import Optional, TypedDict
 
 from .completion import Completion
 from .episode import Episode
 from ..tokenizer import Tokenizer
-from ..utils import truncate_pad
+from ..utils import Timer, truncate_pad
 
 
 class PackedTensors(TypedDict):
@@ -13,10 +14,19 @@ class PackedTensors(TypedDict):
     advantages: torch.Tensor
     logprobs: torch.Tensor
     weights: torch.Tensor
-    ids: torch.Tensor
-    parent_ids: torch.Tensor
-    ancestor_ids: torch.Tensor
-    pos_ids: torch.Tensor
+    mask: torch.Tensor
+    input_pos: torch.Tensor
+
+
+class PackedDataset(Dataset[PackedTensors]):
+    def __init__(self, tensors: PackedTensors) -> None:
+        self.tensors = tensors
+
+    def __len__(self) -> int:
+        return self.tensors["tokens"].shape[0]
+
+    def __getitem__(self, index: int) -> PackedTensors:
+        return {key: tensor[index] for key, tensor in self.tensors.items()}  # type: ignore
 
 
 def packed_tensors(
@@ -26,40 +36,55 @@ def packed_tensors(
     trajectories_per_episode: Optional[int],
     tokenizer: Tokenizer,
 ) -> PackedTensors:
-    sequences, completion_weights = packed_sequences(
-        episodes, model, sequence_length, trajectories_per_episode, tokenizer
-    )
-    all_token_count_cache = {}
-    completion_tensors = {
-        completion: get_completion_tensors(
-            completion, weight, tokenizer, all_token_count_cache
+    with Timer("Packed sequences"):
+        sequences, completion_weights = packed_sequences(
+            episodes, model, sequence_length, trajectories_per_episode, tokenizer
         )
-        for completion, weight in completion_weights.items()
-    }
+    max_ancestors = max(episode.completion.max_depth(model) for episode in episodes) + 1
+    with Timer("Prepared tensors"):
+        completion_tensors = {
+            completion: get_completion_tensors(
+                completion, weight, tokenizer, max_ancestors
+            )
+            for completion, weight in completion_weights.items()
+        }
+        tensors = {
+            key: torch.stack(
+                [
+                    truncate_pad(
+                        torch.cat(
+                            [
+                                completion_tensors[completion][key]
+                                for completion in sequence
+                            ]
+                        ),
+                        [sequence_length],
+                        mode="constant",
+                        value=pad_value,
+                    )
+                    for sequence in sequences
+                ]
+            )
+            for key, pad_value in {
+                "tokens": tokenizer.get_pad_token_id() or 0,
+                "advantages": torch.nan,
+                "logprobs": torch.nan,
+                "weights": 0.0,
+                "ids": 0,
+                "ancestor_ids": 0,
+                "input_pos": 0,
+            }.items()
+        }  # type: ignore
+    with Timer("Created mask"):
+        mask = get_mask(tensors["ids"], tensors["ancestor_ids"])
     return {
-        key: torch.stack(
-            [
-                truncate_pad(
-                    torch.cat(
-                        [completion_tensors[completion][key] for completion in sequence]
-                    ),
-                    [sequence_length],
-                    value=pad_value,
-                )
-                for sequence in sequences
-            ]
-        )
-        for key, pad_value in {
-            "tokens": tokenizer.get_pad_token_id() or 0,
-            "advantages": torch.nan,
-            "logprobs": torch.nan,
-            "weights": 0.0,
-            "ids": 0,
-            "parent_ids": 0,
-            "ancestor_ids": 0,
-            "pos_ids": 0,
-        }.items()
-    }  # type: ignore
+        "tokens": tensors["tokens"],
+        "advantages": tensors["advantages"],
+        "logprobs": tensors["logprobs"],
+        "weights": tensors["weights"],
+        "mask": mask,
+        "input_pos": tensors["input_pos"],
+    }
 
 
 def packed_sequences(
@@ -134,8 +159,8 @@ def get_completion_tensors(
     completion: Completion,
     weight: float,
     tokenizer: Tokenizer,
-    all_token_count_cache: dict[Completion, int],
-) -> PackedTensors:
+    max_ancestors: int,
+) -> dict[str, torch.Tensor]:
     tokens = completion.tokens(tokenizer, cache=True)
     # replacement_token, replacement_token_id = get_replacement_token(tokens, tokenizer)
     # Hard coding this for now
@@ -153,31 +178,20 @@ def get_completion_tensors(
     ancestor_ids = [
         id(ancestor) for ancestor in completion.ancestors(including_self=True)
     ]
-    max_depth = 10
-    ancestor_ids += [ancestor_ids[-1]] * (max_depth - len(ancestor_ids))
-    if completion.parent:
-        if completion.parent in all_token_count_cache:
-            start_pos_id = all_token_count_cache[completion.parent]
-        else:
-            start_pos_id = all_token_count_cache[completion.parent] = (
-                completion.parent.all_token_count(tokenizer, cache=True)
-            )
-    else:
-        start_pos_id = 0
+    ancestor_ids += [ancestor_ids[-1]] * (max_ancestors - len(ancestor_ids))
+    start_pos_id = (
+        completion.parent.all_token_count(tokenizer, cache=True)
+        if completion.parent
+        else 0
+    )
     return {
         "tokens": tokens,
         "advantages": advantages,
         "logprobs": logprobs,
         "weights": torch.tensor([weight for _ in range(tokens.shape[0])]),
         "ids": torch.tensor([id(completion) for _ in range(tokens.shape[0])]),
-        "parent_ids": torch.tensor(
-            [
-                id(completion.parent) if completion.parent else id(completion)
-                for _ in range(tokens.shape[0])
-            ]
-        ),
         "ancestor_ids": torch.tensor([ancestor_ids for _ in range(tokens.shape[0])]),
-        "pos_ids": torch.tensor(
+        "input_pos": torch.tensor(
             [i for i in range(start_pos_id, tokens.shape[0] + start_pos_id)]
         ),
     }
@@ -198,3 +212,27 @@ def get_replacement_token(
             except:
                 continue
     raise ValueError("No replacement token found")
+
+
+def get_mask(ids: torch.Tensor, ancestor_ids: torch.Tensor) -> torch.Tensor:
+    """Creates an attention mask for hierarchical attention based on node IDs and their ancestor IDs.
+
+    Args:
+        ids: A tensor of shape (batch_size, sequence_length) containing node IDs
+        ancestor_ids: A tensor of shape (batch_size, sequence_length, max_ancestors) containing ancestor IDs for each node
+            including itself, padded with zeros
+
+    Returns:
+        A boolean tensor of shape (batch_size, sequence_length, sequence_length) where True indicates
+        allowed attention connections. Each position can attend to itself and any of its ancestors
+        in the hierarchy, but only for previous positions (due to causal masking).
+    """
+    # Compare each position against all ancestors of each other position
+    # Shape: (batch, seq, seq, max_ancestors)
+    mask = ids.unsqueeze(1).unsqueeze(3) == ancestor_ids.unsqueeze(2)
+    # Reduce over ancestors dimension to get final mask
+    # Shape: (batch, seq, seq)
+    mask = mask.any(dim=3)
+    # Apply causal mask
+    mask &= torch.tril(torch.ones_like(mask, dtype=torch.bool, device=ids.device))
+    return mask

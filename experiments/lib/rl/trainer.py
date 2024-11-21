@@ -1,8 +1,12 @@
-from aioitertools.builtins import iter
+from aioitertools.builtins import iter, enumerate as aenumerate
 from aioitertools import itertools as ait
 from aioitertools.helpers import maybe_await
 import asyncio
 import math
+import os
+import subprocess
+from torchtune.models.llama3_1 import llama3_1_8b
+from torchtune.training.metric_logging import DiskLogger
 from tqdm import tqdm
 from tqdm.notebook import tqdm_notebook
 from typing import (
@@ -17,7 +21,9 @@ from typing import (
 
 from .completion_sampler import CompletionSampler
 from .episode import Episode
-from .pack import packed_tensors, PackedTensors
+from .pack import PackedDataset, packed_tensors
+from .ppo import PPOLoss
+from ..recipes.rl import ComponentConfig, RLConfig, recipe_main
 from ..tokenizer import Tokenizer
 from ..vllm import start_vllm, vLLM
 
@@ -201,11 +207,11 @@ class Trainer:
             dynamic_ncols=True,
             position=pbar_position,
         )
-        pbar.set_postfix(exceptions=0)
+        pbar.set_postfix(completed=0, exceptions=0)
         tasks: list[asyncio.Task[Episode]] = []
         num_episodes: int = 0
-        async for episode in ait.islice(
-            self._train_iterator, self.episodes_per_iteration
+        async for priority, episode in aenumerate(
+            ait.islice(self._train_iterator, self.episodes_per_iteration)
         ):
             if not self._first_train_episode:
                 self._first_train_episode = episode
@@ -215,7 +221,7 @@ class Trainer:
                 self._train_iterator = ait.chain([episode], self._train_iterator)
                 break
             num_episodes += 1
-            task = asyncio.create_task(self._explore_episode(episode, pbar))
+            task = asyncio.create_task(self._explore_episode(episode, pbar, priority))
             tasks.append(task)
         if self.episodes_per_iteration is None:
             self.episodes_per_iteration = num_episodes
@@ -229,16 +235,20 @@ class Trainer:
                 episodes.append(episode)
             except Exception as exception:
                 exceptions.append(exception)
-                pbar.set_postfix(exceptions=len(exceptions))
+            pbar.set_postfix(completed=len(episodes), exceptions=len(exceptions))
         pbar.n = len(episodes)
         pbar.close()
         if return_exceptions:
             return episodes, exceptions
         return episodes
 
-    async def _explore_episode(self, episode: Episode, pbar: tqdm) -> Episode:
+    async def _explore_episode(
+        self, episode: Episode, pbar: tqdm, priority: int
+    ) -> Episode:
         if episode in self._substitute_episodes:
-            return await self._explore_episode(self._substitute_episodes[episode], pbar)
+            return await self._explore_episode(
+                self._substitute_episodes[episode], pbar, priority
+            )
         completion_sampler = await self.completion_sampler()
         frac = None
         while remaining_samples := max(
@@ -278,15 +288,16 @@ class Trainer:
                 else:
                     continue
                 self._substitute_episodes[episode] = substitute
-                return await self._explore_episode(substitute, pbar)
+                return await self._explore_episode(substitute, pbar, priority)
         pbar.update(frac or 0)
         return episode
 
-    async def tune(self, episodes: list[Episode]) -> PackedTensors:
-        # vllm = await self.vllm()
-        # vllm.process.terminate()
-        # self._vllm_task, self._completion_sampler = None, None
-        return packed_tensors(
+    async def tune(self, episodes: list[Episode]) -> None:
+        vllm = await self.vllm()
+        vllm.process.terminate()
+        self._vllm_task, self._completion_sampler = None, None
+
+        tensors = packed_tensors(
             episodes,
             model=self.model,
             sequence_length=self.tune_sequence_length,
@@ -297,6 +308,83 @@ class Trainer:
             ),
             tokenizer=self.tokenizer,
         )
+
+        checkpoint_dir = subprocess.run(
+            f"HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download {self.model[0]}",
+            shell=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        checkpoint_output_dir = "/home/ubuntu/atreides/experiments/models/rl"
+        os.makedirs(checkpoint_output_dir, exist_ok=True)
+
+        PLACEHOLDER: Any = None
+
+        config = RLConfig(
+            # Dataset
+            dataset=ComponentConfig(PackedDataset, tensors=tensors),
+            seed=42,
+            shuffle=False,
+            # Model
+            model=ComponentConfig(llama3_1_8b),
+            num_output_chunks=4,
+            # Checkpointer
+            checkpointer=ComponentConfig(
+                "torchtune.training.FullModelHFCheckpointer",
+                checkpoint_dir=checkpoint_dir,
+                checkpoint_files=[
+                    "model-00001-of-00004.safetensors",
+                    "model-00002-of-00004.safetensors",
+                    "model-00003-of-00004.safetensors",
+                    "model-00004-of-00004.safetensors",
+                ],
+                recipe_checkpoint=None,
+                output_dir=checkpoint_output_dir,
+                model_type="LLAMA3",
+            ),
+            resume_from_checkpoint=False,
+            # Fine-tuning arguments
+            batch_size=2,
+            epochs=1,
+            optimizer=ComponentConfig(
+                # AdamW,
+                "bitsandbytes.optim.PagedAdamW8bit",
+                params=PLACEHOLDER,
+                lr=5e-6,
+                # fused=True,
+            ),
+            loss=ComponentConfig(
+                PPOLoss,
+                # clip_epsilon=0.3,
+                # entropy_coef=0.0,
+                # kl_coef=0.0,
+                clip_epsilon=0.3,
+                entropy_coef=0.025,
+                kl_coef=0.025,
+            ),
+            max_steps_per_epoch=None,
+            compile=False,
+            optimizer_in_bwd=False,
+            gradient_accumulation_steps=1,
+            # Training env
+            device="cuda",
+            # Memory management
+            enable_activation_checkpointing=True,
+            enable_activation_offloading=False,
+            custom_sharded_layers=["tok_embeddings", "output"],
+            # Reduced precision
+            dtype="bf16",
+            # Logging
+            metric_logger=ComponentConfig(
+                DiskLogger, log_dir="/home/ubuntu/atreides/experiments/logs"
+            ),
+            output_dir="/home/ubuntu/atreides/experiments/logs",
+            log_every_n_steps=1,
+            log_peak_memory_stats=True,
+        )
+
+        recipe_main(config)
 
     async def completion_sampler(self) -> CompletionSampler:
         if self._completion_sampler:

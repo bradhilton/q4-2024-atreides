@@ -189,6 +189,7 @@ class Episode:
         completion_sampler: CompletionSampler,
         branch_factor: int,
         max_parallel_splits: int = 1,
+        priority: Optional[int] = None,
         split_by: SplitMethod = "count",
         split_separators: Optional[set[str]] = None,
     ) -> bool:
@@ -212,6 +213,7 @@ class Episode:
                         branch_factor,
                         fork_decay=1.0,
                         split_separators=split_separators or set(),
+                        priority=priority,
                     )
                     for parent in parents
                 )
@@ -255,6 +257,7 @@ class Episode:
         branch_factor: int,
         fork_decay: float,
         split_separators: set[str],
+        priority: Optional[int] = None,
     ) -> bool:
         num_children = sum(1 for child in parent.children if child.model == model)
         n = branch_factor - num_children
@@ -264,6 +267,7 @@ class Episode:
             parent,
             strip=split_separators,
             n=n,
+            extra_body={"priority": priority or 0},
         )
         if num_children:
             for completion in completions:

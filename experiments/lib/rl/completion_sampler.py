@@ -3,6 +3,7 @@ from openai import AsyncOpenAI
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.completion_create_params import CompletionCreateParamsBase
 from typing import (
+    Any,
     cast,
     Never,
     Optional,
@@ -15,6 +16,7 @@ from .completion import Completion
 class Kwargs(CompletionCreateParamsBase, total=False):
     messages: Never
     model: Optional[str]
+    extra_body: dict[str, Any]
 
 
 class CompletionSampler:

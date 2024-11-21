@@ -36,10 +36,7 @@ import torch.distributed
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from torchtune import config, modules, training, utils
-from torchtune.config._utils import _get_component_from_path
-from torchtune.data import padded_collate_packed
 from torchtune.modules import TransformerDecoder
-from torchtune.modules.tokenizers import ModelTokenizer
 from torchtune.recipe_interfaces import FTRecipeInterface
 from torchtune.training import DummyProfiler, PROFILER_KEY
 from torchtune.training.activations import apply_selective_activation_checkpointing
@@ -56,10 +53,6 @@ log = utils.get_logger("DEBUG")
 
 T = TypeVar("T", covariant=True)
 P = ParamSpec("P")
-
-
-class Tokenizer(ModelTokenizer, Protocol):
-    pad_id: int
 
 
 class ComponentConfig(DictConfig, Generic[T]):
@@ -110,7 +103,6 @@ class RLConfig(DictConfig):
         max_steps_per_epoch: Optional[int],
         metric_logger: ComponentConfig[MetricLoggerInterface],
         model: ComponentConfig[TransformerDecoder],
-        tokenizer: ComponentConfig[Tokenizer],
         loss: ComponentConfig[PPOLoss],
         dataset: ComponentConfig[Dataset[TrajectoryTensors]],
         shuffle: bool,
@@ -128,7 +120,6 @@ class RLConfig(DictConfig):
         ac_mode: Optional[str] = None,
         ac_option: Optional[int] = None,
         num_output_chunks: Optional[int] = None,
-        collate_fn: Optional[str] = None,
         profiler: Optional[ComponentConfig] = None,
     ) -> None:
         super().__init__({})
@@ -144,7 +135,6 @@ class RLConfig(DictConfig):
         self.max_steps_per_epoch = max_steps_per_epoch
         self.metric_logger = metric_logger
         self.model = model
-        self.tokenizer = tokenizer
         self.loss = loss
         self.dataset = dataset
         self.shuffle = shuffle
@@ -175,8 +165,6 @@ class RLConfig(DictConfig):
             self.ac_option = ac_option
         if num_output_chunks is not None:
             self.num_output_chunks = num_output_chunks
-        if collate_fn is not None:
-            self.collate_fn = collate_fn
         if profiler is not None:
             self.profiler = profiler
 
@@ -485,7 +473,6 @@ class RLRecipe(FTRecipeInterface):
             ac_mode=cfg.get("ac_mode", None),
             ac_option=cfg.get("ac_option", None),
         )
-        self._tokenizer = instantiate_component(cfg.tokenizer)
 
         self._optimizer = self._setup_optimizer(
             cfg_optimizer=cfg.optimizer,
@@ -517,12 +504,10 @@ class RLRecipe(FTRecipeInterface):
 
         # sampler and dataloader depend on the tokenizer and loss_fn and should be
         # setup after both of these are initialized
-        collate_name: str = cfg.get("collate_fn", "torchtune.data.padded_collate_sft")
         self._sampler, self._dataloader = self._setup_data(
             cfg_dataset=cfg.dataset,
             shuffle=cfg.shuffle,
             batch_size=cfg.batch_size,
-            collate_fn=collate_name,
         )
 
         # Finally update the recipe state which can only be correctly set after all of the
@@ -792,7 +777,6 @@ class RLRecipe(FTRecipeInterface):
         cfg_dataset: ComponentConfig[Dataset[TrajectoryTensors]],
         shuffle: bool,
         batch_size: int,
-        collate_fn: str,
     ) -> Tuple[DistributedSampler, TypedDataLoader[TrajectoryTensors]]:
         """
         All data related setup happens here. Currently this recipe only supports the
@@ -802,12 +786,6 @@ class RLRecipe(FTRecipeInterface):
         world_size, rank = training.get_world_size_and_rank()
 
         ds = instantiate_component(cfg_dataset)
-        packed = cfg_dataset.get("packed", False)
-
-        # Instantiate collate_fn
-        if "left_pad_sequence" in collate_fn:
-            raise RuntimeError("left_pad_sequence collator is only for inference.")
-        _collate_fn = _get_component_from_path(collate_fn)
 
         sampler = DistributedSampler(
             ds, num_replicas=world_size, rank=rank, shuffle=shuffle, seed=0
@@ -818,15 +796,6 @@ class RLRecipe(FTRecipeInterface):
             sampler=sampler,
             # dropping last avoids shape issues with compile + flex attention
             drop_last=True,
-            # collate_fn=(
-            #     partial(
-            #         _collate_fn,
-            #         padding_idx=self._tokenizer.pad_id,  # TODO: `pad_id` type is not defined
-            #         ignore_idx=self._loss_fn.ignore_index,  # TODO: `ignore_index` type is not defined
-            #     )
-            #     if not packed
-            #     else padded_collate_packed
-            # ),
         )
 
         if self._is_rank_zero:
@@ -986,12 +955,18 @@ class RLRecipe(FTRecipeInterface):
 
                 # Assuming the first token in the batch is the bos token
                 bos_id = int(batch["tokens"].view(-1)[0].item())
+                mask = batch.get("mask")
+                if mask is None:
+                    mask = create_packed_causal_mask(batch["tokens"], bos_id=bos_id)
+                input_pos = batch.get("input_pos")
+                if input_pos is None:
+                    input_pos = get_input_pos(batch["tokens"], bos_id=bos_id)
 
                 with self.activations_handling_ctx:
                     logits = self._model.forward(
                         tokens=batch["tokens"],
-                        mask=create_packed_causal_mask(batch["tokens"], bos_id=bos_id),
-                        input_pos=get_input_pos(batch["tokens"], bos_id=bos_id),
+                        mask=mask,
+                        input_pos=input_pos,
                     )
 
                 # Compute loss
@@ -1143,7 +1118,7 @@ def recipe_main(cfg: RLConfig) -> None:
             "Training is not distributed. If you want to train on multiple GPUs and are using the tune CLI, specify --nnodes 1 and --nproc_per_node [num_gpus]"
         )
 
-    config.log_config(recipe_name="FullFinetuneRecipe", cfg=cfg)
+    # config.log_config(recipe_name="FullFinetuneRecipe", cfg=cfg)
 
     recipe = RLRecipe(cfg=cfg)
     recipe.setup(cfg=cfg)

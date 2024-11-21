@@ -1,7 +1,8 @@
 import black
 from collections import deque
+import time
 import torch
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 
 def black_print(
@@ -65,6 +66,26 @@ def read_last_n_lines(filename: str, n: int) -> str:
             lines[0] = chunk[chunk.rindex("\n") + 1 :] + lines[0]
 
     return "\n".join(lines)
+
+
+class Timer:
+    def __init__(self, description: str):
+        self.description = description
+        self.start_time = 0.0
+
+    def __enter__(self):
+        self.start_time = time.time()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[Any],
+    ) -> None:
+        if not exc_type:
+            seconds = time.time() - self.start_time
+            print(f"{self.description} in {seconds:.2f}s ✓")
 
 
 def truncate_pad(
