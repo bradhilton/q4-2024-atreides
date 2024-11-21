@@ -180,7 +180,7 @@ class PPOLoss(nn.Module):
         new_logprobs = dist.log_prob(tokens)  # Shape: (batch_size * sequence_length,)
 
         # Debugging
-        if True:
+        if False:
             # Shape: (batch_size * sequence_length,)
             kl_divergence = torch.nn.functional.kl_div(
                 new_logprobs, logprobs, reduction="none", log_target=True
@@ -201,10 +201,13 @@ class PPOLoss(nn.Module):
             plt.grid(True, alpha=0.3)
             plt.show()
 
-            # Find first token with KL divergence > 1
-            high_kl_idx = (kl_np > 1).nonzero()[0]
+            # Find first token with KL divergence > 10
+            high_kl_idx = (kl_np > 10).nonzero()[0]
             if len(high_kl_idx) > 0:
-                print(f"First token with KL divergence > 1: {high_kl_idx[0]}")
+                print(f"First token with KL divergence > 10: {high_kl_idx[0]}")
+                print(f"Token: {tokens[high_kl_idx[0]]}")
+                print(f"Logprob: {logprobs[high_kl_idx[0]]}")
+                print(f"New Logprob: {new_logprobs[high_kl_idx[0]]}")
             else:
                 print("No tokens found with KL divergence > 1")
 

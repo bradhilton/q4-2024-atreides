@@ -354,6 +354,14 @@ class Completion:
             ),
             continue_final_message=role(self.messages[-1]) == "assistant"
             and any(role(child.messages[0]) == "assistant" for child in self.children),
+            replace_suffix=(
+                ("<|im_end|>\n", "\n")
+                if isinstance(self.messages[-1], Choice)
+                and self.messages[-1].logprobs
+                and self.messages[-1].logprobs.content
+                and self.messages[-1].logprobs.content[-1].token == "<|im_end|>"
+                else None
+            ),
         )
         if cache and replacement_token is None:
             self._cached_tokens = tokens

@@ -172,18 +172,29 @@ def get_completion_tensors(
     # replacement_token, replacement_token_id = get_replacement_token(tokens, tokenizer)
     # Hard coding this for now
     replacement_token, replacement_token_id = "<|reserved_special_token_250|>", 128255
-    mask = (
-        completion.tokens(tokenizer, replacement_token=replacement_token)
-        == replacement_token_id
-    )
+    replaced_tokens = completion.tokens(tokenizer, replacement_token=replacement_token)
+    mask = replaced_tokens == replacement_token_id
+    if tokens.shape != replaced_tokens.shape:
+        tokens = replaced_tokens.clone()
+        tokens[mask] = torch.tensor(
+            tokenizer.llm.get_tokenizer()(
+                [
+                    token_logprob.token
+                    for token_logprobs in completion._token_logprob_sequences()
+                    for token_logprob in token_logprobs
+                ],
+                add_special_tokens=False,
+                is_split_into_words=True,  # type: ignore
+            )["input_ids"]
+        )
     advantages = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
     advantages[mask] = torch.tensor(
         [advantage for advantage in completion.token_advantages(cache=True)]
     )
     logprobs = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
     logprobs[mask] = torch.tensor([logprob for logprob in completion.logprobs()])
-    # if not prev_completion is completion.parent:
-    if True:
+    if not prev_completion is completion.parent:
+        # if True:
         advantages[0] = logprobs[0] = torch.nan
     ancestor_ids = [
         id(ancestor) for ancestor in completion.ancestors(including_self=True)

@@ -50,6 +50,7 @@ class Tokenizer:
         first_message_is_continuation: bool = False,
         add_generation_prompt: bool = False,
         continue_final_message: bool = True,
+        replace_suffix: Optional[tuple[str, str]] = None,
         concatenate: bool = False,
         seqlen: Optional[int] = None,
     ) -> torch.Tensor:
@@ -59,16 +60,12 @@ class Tokenizer:
         def patch(
             prompts: list[dict[str, str]], *args: object, **kwargs: object
         ) -> list[list[int]]:
-            # print(
-            #     prompts[0]["prompt"]
-            #     .removeprefix("<|begin_of_text|>")
-            #     .removesuffix("<|im_end|>")
-            # )
             return [
                 tokenizer.encode(
                     prompt["prompt"]
                     .removeprefix("<|begin_of_text|>")
-                    .replace("<|im_end|><|im_end|>", "<|im_end|>")
+                    .removesuffix(replace_suffix[0] if replace_suffix else "")
+                    + (replace_suffix[1] if replace_suffix else "")
                 )[
                     (
                         self.prefix_token_count
