@@ -76,7 +76,12 @@ def packed_tensors(
                 "ancestor_ids": 0,
                 "input_pos": 0,
             }.items()
-        }  # type: ignore
+        }
+        tensors["advantages"] = (
+            tensors["advantages"] - torch.nanmean(tensors["advantages"])
+        ) / (
+            torch.std(tensors["advantages"][~torch.isnan(tensors["advantages"])]) + 1e-5
+        )
     with Timer("Created mask"):
         mask = get_mask(tensors["ids"], tensors["ancestor_ids"])
     return {
@@ -194,7 +199,6 @@ def get_completion_tensors(
     logprobs = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
     logprobs[mask] = torch.tensor([logprob for logprob in completion.logprobs()])
     if not prev_completion is completion.parent:
-        # if True:
         advantages[0] = logprobs[0] = torch.nan
     ancestor_ids = [
         id(ancestor) for ancestor in completion.ancestors(including_self=True)

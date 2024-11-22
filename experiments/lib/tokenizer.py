@@ -24,16 +24,10 @@ class Tokenizer:
             - 2
             - self.prefix_token_count
         )
-        self.token_counts: dict[str, int] = {}
 
     def get_pad_token_id(self) -> Optional[int]:
         tokenizer = self.llm.get_tokenizer()
         return getattr(tokenizer, "pad_token_id", None) or tokenizer.eos_token_id
-
-    def get_token_count(self, content: str) -> int:
-        if content not in self.token_counts:
-            self.token_counts[content] = len(self.llm.get_tokenizer().encode(content))
-        return self.token_counts[content]
 
     def get_token_id(self, token: str) -> int:
         return self.llm.get_tokenizer().convert_tokens_to_ids(token)  # type: ignore

@@ -651,37 +651,5 @@ def joined_assistant_message_params(
     return [message_param]
 
 
-def message_token_count(
-    message: Union[ChatCompletionMessageParam, Choice], tokenizer: Tokenizer
-) -> int:
-    token_count = 0
-    if isinstance(message, Choice):
-        if message.logprobs:
-            token_count += len(
-                message.logprobs.content or message.logprobs.refusal or []
-            )
-        else:
-            token_count += tokenizer.get_token_count(
-                message.message.content or message.message.refusal or ""
-            )
-    else:
-        content = message.get("content")
-        if isinstance(content, str):
-            token_count += tokenizer.get_token_count(content)
-        elif content is not None:
-            token_count += sum(
-                tokenizer.get_token_count(
-                    part["text"]
-                    if part["type"] == "text"
-                    else part["refusal"] if part["type"] == "refusal" else ""
-                )
-                for part in content
-            )
-        refusal = message.get("refusal")
-        if isinstance(refusal, str):
-            token_count += tokenizer.get_token_count(refusal)
-    return token_count
-
-
 def role(message: Union[ChatCompletionMessageParam, Choice]) -> str:
     return message.message.role if isinstance(message, Choice) else message["role"]

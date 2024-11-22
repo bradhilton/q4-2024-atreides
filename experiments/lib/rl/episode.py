@@ -25,6 +25,7 @@ from ..tokenizer import Tokenizer
 class EpisodeCompletion:
     _completion: Completion
     _sampler: CompletionSampler
+    _priority: Optional[int] = None
 
     @property
     def last_assistant_message(self) -> ChatCompletionAssistantMessageParam:
@@ -53,7 +54,8 @@ class EpisodeCompletion:
         self, messages: list[ChatCompletionMessageParam]
     ) -> "EpisodeCompletion":
         completions = await self._sampler.sample_completions(
-            Completion(parent=self._completion, messages=messages)
+            Completion(parent=self._completion, messages=messages),
+            extra_body={"priority": self._priority or 0},
         )
         return EpisodeCompletion(_completion=completions[0], _sampler=self._sampler)
 
@@ -275,7 +277,7 @@ class Episode:
                 completion.fork = True
         on_sample = self.on_sample(
             [
-                EpisodeCompletion(completion, completion_sampler)
+                EpisodeCompletion(completion, completion_sampler, priority)
                 for completion in completions
             ]
         )

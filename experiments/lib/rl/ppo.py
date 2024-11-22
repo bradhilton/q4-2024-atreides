@@ -246,16 +246,6 @@ class PPOLoss(nn.Module):
         # Entropy bonus (to encourage exploration)
         entropy_bonus = entropy.sum()  # Scalar
 
-        # # Debugging
-        # if False:
-        #     new_probs = torch.exp(new_logprobs)
-        #     old_probs = torch.exp(logprobs)
-        #     print(
-        #         torch.corrcoef(torch.stack([new_probs, old_probs], dim=1).T)[
-        #             0, 1
-        #         ].item()
-        #     )
-
         # Calculate KL divergence between the old and new policies
         kl_divergence = torch.nn.functional.kl_div(
             new_logprobs, logprobs, reduction="sum", log_target=True
