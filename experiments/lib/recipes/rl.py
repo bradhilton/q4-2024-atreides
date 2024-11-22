@@ -78,6 +78,18 @@ class ComponentConfig(DictConfig, Generic[T]):
             )
         self.update(kwargs)
 
+    def dict_config(self) -> DictConfig:
+        return DictConfig(
+            {
+                "_component_": (
+                    self._component_
+                    if isinstance(self._component_, str)
+                    else f"{self._component_.__module__}.{self._component_.__name__}"
+                ),
+                **{k: v for k, v in self.items() if k != "_component_"},
+            }
+        )
+
 
 def instantiate_component(cfg: ComponentConfig[T], *args: Any, **kwargs: Any) -> T:
     if isinstance(cfg._component_, str):
@@ -94,7 +106,6 @@ class RLConfig(DictConfig):
         device: Optional[Union[str, torch.device]],
         dtype: Optional[Union[str, torch.dtype]],
         optimizer: ComponentConfig[Optimizer],
-        output_dir: str,
         resume_from_checkpoint: bool,
         gradient_accumulation_steps: int,
         checkpointer: ComponentConfig[Checkpointer],
@@ -126,7 +137,6 @@ class RLConfig(DictConfig):
         self.device = device
         self.dtype = dtype
         self.optimizer = optimizer
-        self.output_dir = output_dir
         self.resume_from_checkpoint = resume_from_checkpoint
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.checkpointer = checkpointer
@@ -167,6 +177,19 @@ class RLConfig(DictConfig):
             self.num_output_chunks = num_output_chunks
         if profiler is not None:
             self.profiler = profiler
+
+    def dict_config(self) -> DictConfig:
+        config = {}
+        for k, v in self.__dict__.items():
+            if isinstance(v, ComponentConfig):
+                config[k] = v.dict_config()
+            elif isinstance(v, torch.device):
+                config[k] = str(v)
+            elif isinstance(v, torch.dtype):
+                config[k] = str(v)
+            else:
+                config[k] = v
+        return DictConfig(config)
 
 
 class TypedDataLoader(DataLoader[T]):
