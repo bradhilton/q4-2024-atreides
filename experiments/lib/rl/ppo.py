@@ -106,6 +106,7 @@ class PPOLoss(nn.Module):
         tokens: torch.Tensor,
         advantages: torch.Tensor,
         logprobs: torch.Tensor,
+        weights: Optional[torch.Tensor] = None,
         bos_id: Optional[int] = None,
     ) -> PPOResult:
         """
@@ -129,6 +130,10 @@ class PPOLoss(nn.Module):
                 Shape: (batch_size, sequence_length)
                 Log probabilities of the sampled tokens under the old policy.
 
+            weights (Optional[Tensor]):
+                Shape: (batch_size, sequence_length)
+                Optional weights for each token in the sequence.
+
             bos_id (Optional[int] = None):
                 Index of the beginning of sequence token in the vocabulary. If None, defaults
                 to the first token in `tokens`.
@@ -147,11 +152,18 @@ class PPOLoss(nn.Module):
                 tokens.chunk(num_chunks, dim=1),
                 advantages.chunk(num_chunks, dim=1),
                 logprobs.chunk(num_chunks, dim=1),
+                (
+                    weights.chunk(num_chunks, dim=1)
+                    if weights is not None
+                    else [None] * num_chunks
+                ),
             ):
                 result += self._forward_chunk(*chunked_args, bos_id=bos_id)
             return result
 
-        return self._forward_chunk(logits, tokens, advantages, logprobs, bos_id=bos_id)
+        return self._forward_chunk(
+            logits, tokens, advantages, logprobs, weights, bos_id=bos_id
+        )
 
     def _forward_chunk(
         self,
@@ -159,6 +171,7 @@ class PPOLoss(nn.Module):
         tokens: torch.Tensor,
         advantages: torch.Tensor,
         logprobs: torch.Tensor,
+        weights: Optional[torch.Tensor],
         bos_id: int,
     ) -> PPOResult:
         """
@@ -171,6 +184,8 @@ class PPOLoss(nn.Module):
         # Shape: (batch_size * sequence_length,)
         advantages = shift(advantages).view(-1)
         logprobs = shift(logprobs).view(-1)  # Shape: (batch_size * sequence_length,)
+        if weights:
+            weights = shift(weights).view(-1)  # Shape: (batch_size * sequence_length,)
 
         # Create a Categorical distribution from logits
         # Shape: (batch_size * sequence_length,)
@@ -226,6 +241,8 @@ class PPOLoss(nn.Module):
         logprobs = logprobs[mask]  # Shape: (num_tokens,)
         advantages = advantages[mask]  # Shape: (num_tokens,)
         entropy = entropy[mask]  # Shape: (num_tokens,)
+        if weights:
+            weights = weights[mask]
 
         if self.normalize_advantages:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -241,14 +258,20 @@ class PPOLoss(nn.Module):
         )  # Shape: (num_valid_tokens,)
 
         # Take the minimum of the two surrogate losses
-        policy_loss = -torch.min(surrogate1, surrogate2).sum()  # Scalar
+        policy_loss = (
+            -torch.min(surrogate1, surrogate2).mul(weights or 1).sum()
+        )  # Scalar
 
-        # Entropy bonus (to encourage exploration)
-        entropy_bonus = entropy.sum()  # Scalar
+        # Entropy bonus
+        entropy_bonus = entropy.mul(weights or 1).sum()  # Scalar
 
         # Calculate KL divergence between the old and new policies
-        kl_divergence = torch.nn.functional.kl_div(
-            new_logprobs, logprobs, reduction="sum", log_target=True
+        kl_divergence = (
+            torch.nn.functional.kl_div(
+                new_logprobs, logprobs, reduction="none", log_target=True
+            )
+            .mul(weights or 1)
+            .sum()
         )
 
         return PPOResult(

@@ -2,9 +2,11 @@ from aioitertools.builtins import iter, enumerate as aenumerate
 from aioitertools import itertools as ait
 from aioitertools.helpers import maybe_await
 import asyncio
+import glob
 import math
 import os
-import subprocess
+import re
+import shutil
 from torchtune.models.llama3_1 import llama3_1_8b
 from torchtune.training.metric_logging import DiskLogger
 from tqdm import tqdm
@@ -21,7 +23,7 @@ from typing import (
 
 from .completion_sampler import CompletionSampler
 from .episode import Episode
-from .pack import PackedDataset, packed_tensors
+from .pack import PackedDataset, packed_tensors, PackedTensors
 from .ppo import PPOLoss
 from ..recipes.rl import ComponentConfig, RLConfig, recipe_main
 from ..tokenizer import Tokenizer
@@ -35,6 +37,7 @@ class Trainer:
     def __init__(
         self,
         base_model: str,
+        output_dir: str,
         samples_per_episode: int,
         branch_factor: int,
         train_episodes: Episodes,
@@ -43,6 +46,7 @@ class Trainer:
         val_samples_per_episode: int = 1,
         test_episodes: Optional[Episodes] = None,
         test_samples_per_episode: int = 1,
+        base_model_checkpoint_files: Optional[list[str]] = None,
         tune_episode_sample_fraction: float = 1.0,
         tune_sequence_length: int = 8192,
         vllm_env: Optional[dict[str, str]] = None,
@@ -50,7 +54,22 @@ class Trainer:
         vllm_max_concurrent_requests: int = 128,
         vllm_timeout: float = 120.0,
     ) -> None:
-        self.models = [base_model]
+        self.output_dir = os.path.abspath(output_dir)
+        os.makedirs(self.output_dir, exist_ok=True)
+        last_iteration = max(
+            (
+                int(subdir)
+                for subdir in os.listdir(self.output_dir)
+                if os.path.isdir(os.path.join(self.output_dir, subdir))
+                and subdir.isdigit()
+            ),
+            default=None,
+        )
+        self.models = [
+            f"{self.output_dir}/{last_iteration:04d}" if last_iteration is not None else base_model
+        ]
+        if self.model != base_model:
+            print(f"Resuming from {self.model}")
         self.samples_per_episode = samples_per_episode
         self.branch_factor = branch_factor
         self._train_iterator = ait.cycle(train_episodes)
@@ -67,6 +86,7 @@ class Trainer:
             "test": test_samples_per_episode,
         }
         self.eval_scores: dict[str, dict[str, float]] = {"val": {}, "test": {}}
+        self.base_model_checkpoint_files = base_model_checkpoint_files
         self.tune_episode_sample_fraction = tune_episode_sample_fraction
         self.tune_sequence_length = tune_sequence_length
         self.vllm_kwargs = vllm_kwargs or {}
@@ -126,7 +146,7 @@ class Trainer:
             if return_exceptions:
                 return None, []
             return None
-        completion_sampler = await self.completion_sampler()
+        completion_sampler = await self.get_completion_sampler()
         pbar = self.tqdm(
             desc=split,
             total=getattr(self.eval_episodes[split], "__len__", lambda: None)(),
@@ -199,7 +219,7 @@ class Trainer:
     async def explore(
         self, pbar_position: Optional[int] = None, *, return_exceptions: bool = False
     ) -> Union[list[Episode], tuple[list[Episode], list[Exception]]]:
-        await self.completion_sampler()
+        await self.get_completion_sampler()
         pbar = self.tqdm(
             desc="explore",
             total=self.episodes_per_iteration,
@@ -249,7 +269,7 @@ class Trainer:
             return await self._explore_episode(
                 self._substitute_episodes[episode], pbar, priority
             )
-        completion_sampler = await self.completion_sampler()
+        completion_sampler = await self.get_completion_sampler()
         frac = None
         while remaining_samples := max(
             self.samples_per_episode - episode.num_samples(model=self.model), 0
@@ -292,10 +312,8 @@ class Trainer:
         pbar.update(frac or 0)
         return episode
 
-    async def tune(self, episodes: list[Episode]) -> None:
-        vllm = await self.vllm()
-        vllm.process.terminate()
-        self._vllm_task, self._completion_sampler = None, None
+    async def tune(self, episodes: list[Episode]) -> tuple[PackedTensors, str, list[str]]:
+        await self.stop_vllm()
 
         tensors = packed_tensors(
             episodes,
@@ -309,87 +327,88 @@ class Trainer:
             tokenizer=self.tokenizer,
         )
 
-        checkpoint_dir = subprocess.run(
-            f"HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download {self.model[0]}",
-            shell=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        if os.path.exists(os.path.abspath(self.model)):
+            checkpoint_dir = os.path.abspath(self.model)
+            checkpoint_files = None
+        else:
+            process = await asyncio.create_subprocess_shell(
+                f"HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download {self.model}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await process.communicate()
+            checkpoint_dir = stdout.decode().strip()
+            checkpoint_files = self.base_model_checkpoint_files
 
-        checkpoint_output_dir = "/home/ubuntu/atreides/experiments/models/rl"
-        os.makedirs(checkpoint_output_dir, exist_ok=True)
-
-        PLACEHOLDER: Any = None
-
-        config = RLConfig(
-            # Dataset
-            dataset=ComponentConfig(PackedDataset, tensors=tensors),
-            seed=42,
-            shuffle=False,
-            # Model
-            model=ComponentConfig(llama3_1_8b),
-            num_output_chunks=4,
-            # Checkpointer
-            checkpointer=ComponentConfig(
-                "torchtune.training.FullModelHFCheckpointer",
-                checkpoint_dir=checkpoint_dir,
-                checkpoint_files=[
-                    "model-00001-of-00004.safetensors",
-                    "model-00002-of-00004.safetensors",
-                    "model-00003-of-00004.safetensors",
-                    "model-00004-of-00004.safetensors",
-                ],
-                recipe_checkpoint=None,
-                output_dir=checkpoint_output_dir,
-                model_type="LLAMA3",
+        checkpoint_files = checkpoint_files or [file for ext in ["safetensors", "pt", "ckpt", "bin", "pth"] for file in glob.glob(f"{checkpoint_dir}/*.{ext}")]
+        return tensors, checkpoint_dir, checkpoint_files
+    
+    def save(self, base_checkpoint_dir: str) -> None:
+        # Find the latest epoch number from model checkpoint files
+        epoch = max(
+            (
+                int(result.group(1))
+                for result in (
+                    re.search(r"hf_model_\d+_(\d+)\.pt", file)
+                    for file in glob.glob(f"{self.output_dir}/hf_model_*_*.pt")
+                )
+                if result
             ),
-            resume_from_checkpoint=False,
-            # Fine-tuning arguments
-            batch_size=2,
-            epochs=1,
-            optimizer=ComponentConfig(
-                # AdamW,
-                "bitsandbytes.optim.PagedAdamW8bit",
-                params=PLACEHOLDER,
-                lr=5e-6,
-                # fused=True,
-            ),
-            loss=ComponentConfig(
-                PPOLoss,
-                # clip_epsilon=0.3,
-                # entropy_coef=0.0,
-                # kl_coef=0.0,
-                clip_epsilon=0.3,
-                entropy_coef=0.025,
-                kl_coef=0.025,
-            ),
-            max_steps_per_epoch=None,
-            compile=False,
-            optimizer_in_bwd=False,
-            gradient_accumulation_steps=1,
-            # Training env
-            device="cuda",
-            # Memory management
-            enable_activation_checkpointing=True,
-            enable_activation_offloading=False,
-            custom_sharded_layers=["tok_embeddings", "output"],
-            # Reduced precision
-            dtype="bf16",
-            # Logging
-            metric_logger=ComponentConfig(
-                DiskLogger, log_dir="/home/ubuntu/atreides/experiments/logs"
-            ),
-            output_dir="/home/ubuntu/atreides/experiments/logs",
-            log_every_n_steps=1,
-            log_peak_memory_stats=True,
+            default=None,
         )
 
-        recipe_main(config)
+        if epoch is None:
+            print(f"No model checkpoint files found to save in output directory {self.output_dir}")
+            return
 
-    async def completion_sampler(self) -> CompletionSampler:
+        # Find the next iteration number by looking at existing subdirectories
+        iteration = (
+            max(
+                (
+                    int(subdir)
+                    for subdir in os.listdir(self.output_dir)
+                    if os.path.isdir(os.path.join(self.output_dir, subdir))
+                    and subdir.isdigit()
+                ),
+                default=0,
+            )
+            + 1
+        )
+        model_name = f"{self.output_dir}/{iteration:04d}"
+
+        # Create a new directory for this iteration
+        iteration_dir = f"{self.output_dir}/{iteration:04d}"
+        os.makedirs(iteration_dir, exist_ok=True)
+
+        # Copy configuration files (non-model files) to the iteration directory
+        for file in os.listdir(base_checkpoint_dir):
+            if not any(
+                file.endswith(suffix)
+                for suffix in (".safetensors", ".pt", ".ckpt", ".bin", ".pth", ".h5")
+            ):
+                src = os.path.join(base_checkpoint_dir, file)
+                dst = os.path.join(iteration_dir, file)
+                shutil.copy2(src, dst)
+
+        # Move model checkpoint files to the iteration directory
+        for src in glob.glob(f"{self.output_dir}/hf_model_*_{epoch}.pt"):
+            dst = f"{iteration_dir}/{os.path.basename(src)}"
+            shutil.move(src, dst)
+
+        # Delete remaining model checkpoint files in checkpoint_output_dir root
+        for file in glob.glob(f"{self.output_dir}/hf_model_*_*.pt"):
+            if os.path.isfile(file):
+                os.remove(file)
+
+        print(f"Saved iteration {iteration} model files to {model_name}")
+        self.models.append(model_name)
+
+    async def get_completion_sampler(self) -> CompletionSampler:
+        if not self._vllm_task:
+            self._completion_sampler = None
         if self._completion_sampler:
             return self._completion_sampler
-        vllm = await self.vllm()
+        vllm = await self.get_or_start_vllm()
         self._completion_sampler = CompletionSampler(
             vllm.client,
             max_concurrent_requests=self.vllm_max_concurrent_requests,
@@ -397,7 +416,7 @@ class Trainer:
         )
         return self._completion_sampler
 
-    async def vllm(self) -> vLLM:
+    async def get_or_start_vllm(self) -> vLLM:
         if not self._vllm_task:
             self._vllm_task = asyncio.create_task(
                 start_vllm(
@@ -406,4 +425,18 @@ class Trainer:
                     **self.vllm_kwargs,
                 )
             )
-        return await self._vllm_task
+        try:
+            return await self._vllm_task
+        except BaseException as exception:
+            self._vllm_task = None
+            raise exception
+        
+    async def stop_vllm(self) -> None:
+        if self._vllm_task:
+            try:
+                vllm = await self._vllm_task
+                vllm.process.terminate()
+            except BaseException as exception:
+                print(type(exception), exception)
+            finally:
+                self._vllm_task = None

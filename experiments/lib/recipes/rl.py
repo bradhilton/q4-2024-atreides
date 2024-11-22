@@ -968,6 +968,7 @@ class RLRecipe(FTRecipeInterface):
                         mask=mask,
                         input_pos=input_pos,
                     )
+                    del mask, input_pos
 
                 # Compute loss
                 current_result = self._loss_fn.forward(
@@ -975,11 +976,10 @@ class RLRecipe(FTRecipeInterface):
                     batch["tokens"],
                     batch["advantages"],
                     batch["logprobs"],
+                    batch.get("weights"),
                     bos_id=bos_id,
                 )
-
-                # free logits otherwise it peaks backward memory
-                del logits
+                del logits, batch
 
                 running_result += current_result
 
@@ -994,6 +994,7 @@ class RLRecipe(FTRecipeInterface):
                     current_loss = current_result.total_loss
 
                 current_loss.backward()
+                del current_loss
 
                 # Step with optimizer
                 if (idx + 1) % self._gradient_accumulation_steps == 0:
@@ -1063,6 +1064,7 @@ class RLRecipe(FTRecipeInterface):
                         )
 
                     # Reset running stats for the next step
+                    del running_result
                     running_result = PPOResult()
                     t0 = time.perf_counter()
 

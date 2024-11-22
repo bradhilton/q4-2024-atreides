@@ -108,6 +108,8 @@ async def start_vllm(
     **kwargs: Any,
 ) -> vLLM:
     os.environ.pop("VLLM_LOGGING_CONFIG_PATH", None)
+    if os.path.exists(os.path.abspath(model)):
+        model = os.path.abspath(model)
     args = [
         "vllm",
         "serve",
