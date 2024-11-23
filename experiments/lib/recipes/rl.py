@@ -4,35 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from functools import partial
 import os
+from omegaconf import DictConfig
 import sys
 import time
-
-from functools import partial
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    Generic,
-    Iterator,
-    List,
-    Optional,
-    overload,
-    ParamSpec,
-    Protocol,
-    Tuple,
-    TypeVar,
-    Union,
-)
-from warnings import warn
-
 import torch
-from omegaconf import DictConfig
-
-from torch import nn
-from torch.distributed import destroy_process_group, init_process_group
 import torch.distributed
-
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from torchtune import config, modules, training, utils
@@ -43,8 +21,22 @@ from torchtune.training.activations import apply_selective_activation_checkpoint
 from torchtune.training.checkpointing import Checkpointer
 from torchtune.training.lr_schedulers import get_lr
 from torchtune.training.metric_logging import MetricLoggerInterface
-
 from tqdm import tqdm
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generic,
+    Iterator,
+    List,
+    Optional,
+    overload,
+    ParamSpec,
+    Tuple,
+    TypeVar,
+    Union,
+)
+from warnings import warn
 
 from ..rl.ppo import PPOLoss, PPOResult
 from ..rl.trajectory import TrajectoryTensors
@@ -1120,7 +1112,7 @@ class RLRecipe(FTRecipeInterface):
         if self._is_rank_zero:
             self._metric_logger.close()
         if training.is_distributed():
-            destroy_process_group()
+            torch.distributed.destroy_process_group()
 
 
 def recipe_main(cfg: RLConfig) -> None:
@@ -1131,19 +1123,19 @@ def recipe_main(cfg: RLConfig) -> None:
         - Parameters specified in config (see available configs through ``tune ls``)
         - Overwritten by arguments from the command-line
     """
-    if training.is_distributed() and not torch.distributed.is_initialized():
-        init_process_group(backend="gloo" if cfg.device == "cpu" else "nccl")
-        if cfg.get("fsdp_cpu_offload", False):
-            # Utilize all available CPU cores for intra-op parallelism. This provides ~2x
-            # speed up when benchmarking fused AdamW on CPU
-            training.set_torch_num_threads()
-    else:
-        logger = utils.get_logger("INFO")
-        logger.debug(
+    if not training.is_distributed():
+        log.debug(
             "Training is not distributed. If you want to train on multiple GPUs and are using the tune CLI, specify --nnodes 1 and --nproc_per_node [num_gpus]"
         )
+    elif not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(backend="gloo" if cfg.device == "cpu" else "nccl")
 
-    # config.log_config(recipe_name="FullFinetuneRecipe", cfg=cfg)
+    if cfg.get("fsdp_cpu_offload", False):
+        # Utilize all available CPU cores for intra-op parallelism. This provides ~2x
+        # speed up when benchmarking fused AdamW on CPU
+        training.set_torch_num_threads()
+
+    config.log_config(recipe_name="FullFinetuneRecipe", cfg=cfg.dict_config())
 
     recipe = RLRecipe(cfg=cfg)
     recipe.setup(cfg=cfg)
