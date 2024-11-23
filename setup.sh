@@ -16,3 +16,5 @@ gpg --decrypt secrets.tar.gpg > secrets.tar
     git config --global user.name "Brad Hilton" && 
     git config --global user.email "brad.hilton.nw@gmail.com"
 ) & wait # Wait for all background processes to finish
+uv remove torchtune
+uv add git+https://github.com/pytorch/torchtune --rev 4b6877a6ef31a1f987c27594eaf8fe467b5ab785

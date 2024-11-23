@@ -986,7 +986,7 @@ class RLRecipe(FTRecipeInterface):
                     input_pos = get_input_pos(batch["tokens"], bos_id=bos_id)
 
                 with self.activations_handling_ctx:
-                    logits = self._model.forward(
+                    logits = self._model(
                         tokens=batch["tokens"],
                         mask=mask,
                         input_pos=input_pos,
