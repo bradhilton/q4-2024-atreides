@@ -179,17 +179,23 @@ class RLConfig(DictConfig):
             self.profiler = profiler
 
     def dict_config(self) -> DictConfig:
-        config = {}
-        for k, v in self.__dict__.items():
-            if isinstance(v, ComponentConfig):
-                config[k] = v.dict_config()
+        config = DictConfig({})
+        for k, v in self.items():
+            if isinstance(v, DictConfig) and "_component_" in v:
+                v = v.copy()
+                v["_component_"] = (
+                    v["_component_"]
+                    if isinstance(v["_component_"], str)
+                    else f"{v['_component_'].__module__}.{v['_component_'].__name__}"
+                )
+                config[k] = v
             elif isinstance(v, torch.device):
                 config[k] = str(v)
             elif isinstance(v, torch.dtype):
                 config[k] = str(v)
             else:
                 config[k] = v
-        return DictConfig(config)
+        return config
 
 
 class TypedDataLoader(DataLoader[T]):
@@ -341,7 +347,6 @@ class RLRecipe(FTRecipeInterface):
             )
 
         # logging attributes
-        self._output_dir = cfg.output_dir
         self._log_every_n_steps: int = cfg.get("log_every_n_steps", 1)
         self._log_peak_memory_stats: bool = cfg.get("log_peak_memory_stats", False)
 
@@ -553,11 +558,6 @@ class RLRecipe(FTRecipeInterface):
         # Set up profiler, returns DummyProfiler (nullcontext object with no-op `step` method)
         # if cfg is missing profiler key or if `cfg.profiler.enabled = False`
         self._profiler = self._setup_profiler(cfg.get(PROFILER_KEY, None))
-
-        # Used to ignore labels for loss computation
-        self.ignore_advantages_cache = torch.full(
-            (cfg.batch_size, 1), torch.nan, device=self._device
-        )
 
     def _setup_profiler(
         self, cfg_profiler: Optional[DictConfig] = None
@@ -1131,7 +1131,7 @@ def recipe_main(cfg: RLConfig) -> None:
         - Parameters specified in config (see available configs through ``tune ls``)
         - Overwritten by arguments from the command-line
     """
-    if training.is_distributed():
+    if training.is_distributed() and not torch.distributed.is_initialized():
         init_process_group(backend="gloo" if cfg.device == "cpu" else "nccl")
         if cfg.get("fsdp_cpu_offload", False):
             # Utilize all available CPU cores for intra-op parallelism. This provides ~2x

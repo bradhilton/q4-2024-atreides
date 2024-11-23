@@ -184,7 +184,7 @@ class PPOLoss(nn.Module):
         # Shape: (batch_size * sequence_length,)
         advantages = shift(advantages).view(-1)
         logprobs = shift(logprobs).view(-1)  # Shape: (batch_size * sequence_length,)
-        if weights:
+        if weights is not None:
             weights = shift(weights).view(-1)  # Shape: (batch_size * sequence_length,)
 
         # Create a Categorical distribution from logits
@@ -241,8 +241,12 @@ class PPOLoss(nn.Module):
         logprobs = logprobs[mask]  # Shape: (num_tokens,)
         advantages = advantages[mask]  # Shape: (num_tokens,)
         entropy = entropy[mask]  # Shape: (num_tokens,)
-        if weights:
+        if weights is not None:
             weights = weights[mask]
+        else:
+            weights = torch.ones_like(
+                entropy, dtype=entropy.dtype, device=entropy.device
+            )
 
         if self.normalize_advantages:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -258,19 +262,17 @@ class PPOLoss(nn.Module):
         )  # Shape: (num_valid_tokens,)
 
         # Take the minimum of the two surrogate losses
-        policy_loss = (
-            -torch.min(surrogate1, surrogate2).mul(weights or 1).sum()
-        )  # Scalar
+        policy_loss = -torch.min(surrogate1, surrogate2).mul(weights).sum()  # Scalar
 
         # Entropy bonus
-        entropy_bonus = entropy.mul(weights or 1).sum()  # Scalar
+        entropy_bonus = entropy.mul(weights).sum()  # Scalar
 
         # Calculate KL divergence between the old and new policies
         kl_divergence = (
             torch.nn.functional.kl_div(
                 new_logprobs, logprobs, reduction="none", log_target=True
             )
-            .mul(weights or 1)
+            .mul(weights)
             .sum()
         )
 

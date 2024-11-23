@@ -1,7 +1,8 @@
 from collections import Counter
+import os
 import torch
 from torch.utils.data import Dataset
-from typing import Optional, TypedDict
+from typing import Any, Optional, TypedDict, Unpack
 
 from .completion import Completion
 from .episode import Episode
@@ -18,15 +19,56 @@ class PackedTensors(TypedDict):
     input_pos: torch.Tensor
 
 
+class DiskPackedTensors(TypedDict):
+    dir: str
+    num_sequences: int
+    sequence_length: int
+
+
 class PackedDataset(Dataset[PackedTensors]):
-    def __init__(self, tensors: PackedTensors) -> None:
-        self.tensors = tensors
+    def __init__(self, **kwargs: Unpack[DiskPackedTensors]) -> None:
+        self.tensors = packed_tensors_from_dir(**kwargs)
 
     def __len__(self) -> int:
         return self.tensors["tokens"].shape[0]
 
     def __getitem__(self, index: int) -> PackedTensors:
         return {key: tensor[index] for key, tensor in self.tensors.items()}  # type: ignore
+
+
+def packed_tensors_from_dir(**kwargs: Unpack[DiskPackedTensors]) -> PackedTensors:
+    return {
+        key: torch.from_file(
+            f"{kwargs["dir"]}/{key}.pt",
+            shared=True,
+            size=kwargs["num_sequences"]
+            * kwargs["sequence_length"]
+            * (kwargs["sequence_length"] if key == "mask" else 1),
+            dtype=dtype,
+        )
+        .view(kwargs["num_sequences"], kwargs["sequence_length"], -1)
+        .squeeze()
+        for key, dtype in {
+            "tokens": torch.long,
+            "advantages": torch.float32,
+            "logprobs": torch.float32,
+            "weights": torch.float32,
+            "mask": torch.bool,
+            "input_pos": torch.long,
+        }.items()
+    }  # type: ignore
+
+
+def packed_tensors_to_dir(tensors: PackedTensors, dir: str) -> DiskPackedTensors:
+    os.makedirs(dir, exist_ok=True)
+    disk_packed_tensors: DiskPackedTensors = {
+        "dir": dir,
+        "num_sequences": tensors["tokens"].shape[0],
+        "sequence_length": tensors["tokens"].shape[1],
+    }
+    for key, tensor in packed_tensors_from_dir(**disk_packed_tensors).items():
+        tensor.copy_(tensors[key])  # type: ignore
+    return disk_packed_tensors
 
 
 def packed_tensors(
