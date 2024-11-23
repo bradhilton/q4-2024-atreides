@@ -52,14 +52,17 @@ class PPOResult:
     kl_divergence: torch.Tensor = tensor_field()
     num_tokens: torch.Tensor = field(default_factory=lambda: torch.tensor(0))
 
-    def tensors(self) -> Iterable[torch.Tensor]:
+    def named_tensors(self) -> Iterable[tuple[str, torch.Tensor]]:
         for field in fields(self):
-            yield getattr(self, field.name)
+            yield field.name, getattr(self, field.name)
+
+    def tensors(self) -> Iterable[torch.Tensor]:
+        return (tensor for _, tensor in self.named_tensors())
 
     def to(self, target: Union[torch.device, torch.dtype]) -> "PPOResult":
-        for tensor in self.tensors():
-            tensor.to(target)
-        return self
+        return PPOResult(
+            **{name: tensor.to(target) for name, tensor in self.named_tensors()}
+        )
 
     def __iadd__(self, other: "PPOResult") -> "PPOResult":
         for tensor, other_tensor in zip(self.tensors(), other.tensors()):
@@ -93,7 +96,7 @@ class PPOLoss(nn.Module):
             entropy_coef (float): Coefficient for the entropy bonus to encourage exploration.
             kl_coef (float): Coefficient for KL divergence penalty (defaults to 0.0).
         """
-        super(PPOLoss, self).__init__()
+        super().__init__()
         self.policy_coef = policy_coef
         self.clip_epsilon = clip_epsilon
         self.entropy_coef = entropy_coef
@@ -145,7 +148,7 @@ class PPOLoss(nn.Module):
             bos_id = int(tokens.view(-1)[0].item())
 
         if isinstance(logits, list):
-            result = PPOResult()
+            result = PPOResult().to(logits[0].device)
             num_chunks = len(logits)
             for chunked_args in zip(
                 logits,

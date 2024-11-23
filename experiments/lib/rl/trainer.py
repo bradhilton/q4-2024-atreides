@@ -4,16 +4,21 @@ from aioitertools.helpers import maybe_await
 import asyncio
 import glob
 import math
+from omegaconf import OmegaConf
 import os
 import re
 import shutil
-from torchtune.models.llama3_1 import llama3_1_8b
+import sys
+from torchtune.modules import TransformerDecoder
+from torchtune.training import FullModelHFCheckpointer
 from torchtune.training.metric_logging import DiskLogger
 from tqdm import tqdm
 from tqdm.notebook import tqdm_notebook
 from typing import (
     Any,
     AsyncIterable,
+    Callable,
+    IO,
     Iterable,
     Literal,
     Optional,
@@ -23,9 +28,8 @@ from typing import (
 
 from .completion_sampler import CompletionSampler
 from .episode import Episode
-from .pack import PackedDataset, packed_tensors, PackedTensors
-from .ppo import PPOLoss
-from ..recipes.rl import ComponentConfig, RLConfig, recipe_main
+from .pack import PackedDataset, packed_tensors, packed_tensors_to_dir, PackedTensors
+from .recipe import ComponentConfig, recipe_main, TuneRecipeConfig
 from ..tokenizer import Tokenizer
 from ..vllm import start_vllm, vLLM
 
@@ -36,18 +40,25 @@ Episodes = Union[Iterable[Episode], AsyncIterable[Episode]]
 class Trainer:
     def __init__(
         self,
+        *,
         base_model: str,
+        base_model_checkpoint_files: Optional[list[str]] = None,
         output_dir: str,
-        samples_per_episode: int,
-        branch_factor: int,
+        samples_per_episode: Optional[int] = None,
+        branch_factor: int = 2,
         train_episodes: Episodes,
         episodes_per_iteration: Optional[int] = None,
         val_episodes: Optional[Episodes] = None,
         val_samples_per_episode: int = 1,
         test_episodes: Optional[Episodes] = None,
         test_samples_per_episode: int = 1,
-        base_model_checkpoint_files: Optional[list[str]] = None,
+        torchrun_kwargs: Optional[dict[str, Any]] = None,
         tune_episode_sample_fraction: float = 1.0,
+        tune_model: Callable[[], TransformerDecoder],
+        tune_model_type: str,
+        tune_recipe_config: Optional[TuneRecipeConfig] = None,
+        tune_run: bool = True,
+        tune_run_env: Optional[dict[str, str]] = None,
         tune_sequence_length: int = 8192,
         vllm_env: Optional[dict[str, str]] = None,
         vllm_kwargs: Optional[dict[str, Any]] = None,
@@ -66,11 +77,16 @@ class Trainer:
             default=None,
         )
         self.models = [
-            f"{self.output_dir}/{last_iteration:04d}" if last_iteration is not None else base_model
+            (
+                f"{self.output_dir}/{last_iteration:04d}"
+                if last_iteration is not None
+                else base_model
+            )
         ]
         if self.model != base_model:
             print(f"Resuming from {self.model}")
-        self.samples_per_episode = samples_per_episode
+        self.base_model_checkpoint_files = base_model_checkpoint_files
+        self.samples_per_episode = samples_per_episode or branch_factor
         self.branch_factor = branch_factor
         self._train_iterator = ait.cycle(train_episodes)
         self._first_train_episode: Optional[Episode] = None
@@ -86,8 +102,13 @@ class Trainer:
             "test": test_samples_per_episode,
         }
         self.eval_scores: dict[str, dict[str, float]] = {"val": {}, "test": {}}
-        self.base_model_checkpoint_files = base_model_checkpoint_files
+        self.torchrun_kwargs = torchrun_kwargs or {}
         self.tune_episode_sample_fraction = tune_episode_sample_fraction
+        self.tune_model = tune_model
+        self.tune_model_type = tune_model_type
+        self.tune_recipe_config = tune_recipe_config or TuneRecipeConfig()
+        self.tune_run = tune_run
+        self.tune_run_env = tune_run_env or {}
         self.tune_sequence_length = tune_sequence_length
         self.vllm_kwargs = vllm_kwargs or {}
         self.vllm_kwargs["env"] = vllm_env
@@ -107,14 +128,12 @@ class Trainer:
     def model(self) -> str:
         return self.models[-1]
 
-    async def train(self, iterations: int) -> None:
+    async def train(self, iterations: int, test: bool = False) -> None:
         for _ in range(iterations):
-            val_score, episodes = await asyncio.gather(
-                self.eval("val", 0), self.explore(1)
-            )
+            _, episodes = await asyncio.gather(self.eval("val", 0), self.explore(1))
             await self.tune(episodes)
-        val_score, test_score = await asyncio.gather(
-            self.eval("val", 0), self.eval("test", 1)
+        _, _ = await asyncio.gather(
+            self.eval("val", 0), self.eval("test", 1) if test else asyncio.sleep(0)
         )
 
     @overload
@@ -312,9 +331,8 @@ class Trainer:
         pbar.update(frac or 0)
         return episode
 
-    async def tune(self, episodes: list[Episode]) -> tuple[PackedTensors, str, list[str]]:
+    async def tune(self, episodes: list[Episode]) -> None:
         await self.stop_vllm()
-
         tensors = packed_tensors(
             episodes,
             model=self.model,
@@ -326,7 +344,6 @@ class Trainer:
             ),
             tokenizer=self.tokenizer,
         )
-
         if os.path.exists(os.path.abspath(self.model)):
             checkpoint_dir = os.path.abspath(self.model)
             checkpoint_files = None
@@ -334,15 +351,115 @@ class Trainer:
             process = await asyncio.create_subprocess_shell(
                 f"HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download {self.model}",
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
             )
             stdout, _ = await process.communicate()
             checkpoint_dir = stdout.decode().strip()
             checkpoint_files = self.base_model_checkpoint_files
+        checkpoint_files = checkpoint_files or [
+            file
+            for ext in ["safetensors", "pt", "ckpt", "bin", "pth"]
+            for file in glob.glob(f"{checkpoint_dir}/*.{ext}")
+        ]
+        self.tune_recipe_config.checkpointer = ComponentConfig(
+            FullModelHFCheckpointer,
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_files=checkpoint_files,
+            recipe_checkpoint=None,
+            output_dir=self.output_dir,
+            model_type=self.tune_model_type,
+        )
+        if not self.tune_recipe_config.metric_logger:
+            self.tune_recipe_config.metric_logger = ComponentConfig(
+                DiskLogger, log_dir=self.output_dir + "/logs"
+            )
+        self.tune_recipe_config.model = ComponentConfig(self.tune_model)
+        self.tune_recipe_config.dataset = ComponentConfig(
+            PackedDataset,
+            **packed_tensors_to_dir(tensors, self.output_dir + "/tensors"),
+        )
+        if self.tune_run:
+            dict_config = self.tune_recipe_config.dict_config()
+            OmegaConf.save(dict_config, self.output_dir + "/config.yaml")
+            args = [
+                "tune",
+                "run",
+                *[
+                    f"--{key.replace('_', '-')}{f'={value}' if value is not True else ''}"
+                    for key, value in self.torchrun_kwargs.items()
+                ],
+                "lib.recipes.rl.RLRecipe",
+                "--config",
+                self.output_dir + "/config.yaml",
+            ]
+            print(f"$ {' '.join(args)}")
+            process = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={
+                    **os.environ,
+                    **self.tune_run_env,
+                },
+            )
 
-        checkpoint_files = checkpoint_files or [file for ext in ["safetensors", "pt", "ckpt", "bin", "pth"] for file in glob.glob(f"{checkpoint_dir}/*.{ext}")]
+            async def log_output(stream: asyncio.StreamReader, io: IO[str]) -> None:
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    decoded_line = line.decode()
+                    io.write(decoded_line)
+                    io.flush()
+
+            tasks = []
+            if process.stdout:
+                tasks.append(
+                    asyncio.create_task(log_output(process.stdout, sys.stdout))
+                )
+            if process.stderr:
+                tasks.append(
+                    asyncio.create_task(log_output(process.stderr, sys.stderr))
+                )
+            _ = await asyncio.gather(*tasks)
+        else:
+            recipe_main(self.tune_recipe_config)
+        self.save(checkpoint_dir)
+
+    async def tune_resources(
+        self, episodes: list[Episode]
+    ) -> tuple[PackedTensors, str, list[str]]:
+        await self.stop_vllm()
+        tensors = packed_tensors(
+            episodes,
+            model=self.model,
+            sequence_length=self.tune_sequence_length,
+            trajectories_per_episode=(
+                int(self.samples_per_episode * self.tune_episode_sample_fraction)
+                if self.tune_episode_sample_fraction < 1.0
+                else None
+            ),
+            tokenizer=self.tokenizer,
+        )
+        if os.path.exists(os.path.abspath(self.model)):
+            checkpoint_dir = os.path.abspath(self.model)
+            checkpoint_files = None
+        else:
+            process = await asyncio.create_subprocess_shell(
+                f"HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download {self.model}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await process.communicate()
+            checkpoint_dir = stdout.decode().strip()
+            checkpoint_files = self.base_model_checkpoint_files
+        checkpoint_files = checkpoint_files or [
+            file
+            for ext in ["safetensors", "pt", "ckpt", "bin", "pth"]
+            for file in glob.glob(f"{checkpoint_dir}/*.{ext}")
+        ]
         return tensors, checkpoint_dir, checkpoint_files
-    
+
     def save(self, base_checkpoint_dir: str) -> None:
         # Find the latest epoch number from model checkpoint files
         epoch = max(
@@ -358,7 +475,9 @@ class Trainer:
         )
 
         if epoch is None:
-            print(f"No model checkpoint files found to save in output directory {self.output_dir}")
+            print(
+                f"No model checkpoint files found to save in output directory {self.output_dir}"
+            )
             return
 
         # Find the next iteration number by looking at existing subdirectories
@@ -430,7 +549,7 @@ class Trainer:
         except BaseException as exception:
             self._vllm_task = None
             raise exception
-        
+
     async def stop_vllm(self) -> None:
         if self._vllm_task:
             try:

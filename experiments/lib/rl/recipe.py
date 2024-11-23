@@ -38,8 +38,8 @@ from typing import (
 )
 from warnings import warn
 
-from ..rl.ppo import PPOLoss, PPOResult
-from ..rl.trajectory import TrajectoryTensors
+from .ppo import PPOLoss, PPOResult
+from .trajectory import TrajectoryTensors
 
 log = utils.get_logger("DEBUG")
 
@@ -91,25 +91,30 @@ def instantiate_component(cfg: ComponentConfig[T], *args: Any, **kwargs: Any) ->
     return cfg._component_(*args, **_kwargs)
 
 
-class RLConfig(DictConfig):
+PLACEHOLDER: Any = None
+
+
+class TuneRecipeConfig(DictConfig):
     def __init__(
         self,
         *,
-        device: Optional[Union[str, torch.device]],
-        dtype: Optional[Union[str, torch.dtype]],
-        optimizer: ComponentConfig[Optimizer],
-        resume_from_checkpoint: bool,
-        gradient_accumulation_steps: int,
-        checkpointer: ComponentConfig[Checkpointer],
-        seed: Optional[int],
-        epochs: int,
-        max_steps_per_epoch: Optional[int],
-        metric_logger: ComponentConfig[MetricLoggerInterface],
-        model: ComponentConfig[TransformerDecoder],
-        loss: ComponentConfig[PPOLoss],
-        dataset: ComponentConfig[Dataset[TrajectoryTensors]],
-        shuffle: bool,
-        batch_size: int,
+        device: Optional[Union[str, torch.device]] = "cuda",
+        dtype: Optional[Union[str, torch.dtype]] = "bf16",
+        optimizer: ComponentConfig[Optimizer] = ComponentConfig(
+            "torch.optim.AdamW", lr=2e-5, fused=True
+        ),
+        resume_from_checkpoint: bool = False,
+        gradient_accumulation_steps: int = 1,
+        checkpointer: ComponentConfig[Checkpointer] = PLACEHOLDER,
+        seed: Optional[int] = None,
+        epochs: int = 1,
+        max_steps_per_epoch: Optional[int] = None,
+        metric_logger: ComponentConfig[MetricLoggerInterface] = PLACEHOLDER,
+        model: ComponentConfig[TransformerDecoder] = PLACEHOLDER,
+        loss: ComponentConfig[PPOLoss] = ComponentConfig(PPOLoss),
+        dataset: ComponentConfig[Dataset[TrajectoryTensors]] = PLACEHOLDER,
+        shuffle: bool = False,
+        batch_size: int = 1,
         fsdp_cpu_offload: Optional[bool] = None,
         log_every_n_steps: Optional[int] = None,
         log_peak_memory_stats: Optional[bool] = None,
@@ -232,7 +237,7 @@ def get_input_pos(tokens: torch.Tensor, *, bos_id: int) -> torch.Tensor:
     return positions - seq_start_pos
 
 
-class RLRecipe(FTRecipeInterface):
+class TuneRecipe(FTRecipeInterface):
     """
     Full finetuning recipe for dense transformer-based LLMs such as Llama2. This recipe supports
     distributed training and can be run on a single node (1 to 8 GPUs).
@@ -312,7 +317,7 @@ class RLRecipe(FTRecipeInterface):
         RuntimeError: If ``enable_activation_offloading`` is True and ``enable_activation_checkpointing`` is False.
     """
 
-    def __init__(self, cfg: RLConfig) -> None:
+    def __init__(self, cfg: TuneRecipeConfig) -> None:
         self._device = (
             cfg.device
             if isinstance(cfg.device, torch.device)
@@ -466,7 +471,7 @@ class RLRecipe(FTRecipeInterface):
                 "Are you sure you passed in the right recipe checkpoint?"
             ) from e
 
-    def setup(self, cfg: RLConfig) -> None:
+    def setup(self, cfg: TuneRecipeConfig) -> None:
         """
         Setup the recipe. This includes training state (if resume_from_checkpoint is True),
         model, tokenizer, loss, optimizer, sampler, and dataloader.
@@ -1113,9 +1118,10 @@ class RLRecipe(FTRecipeInterface):
             self._metric_logger.close()
         if training.is_distributed():
             torch.distributed.destroy_process_group()
+        training.cleanup_before_training()
 
 
-def recipe_main(cfg: RLConfig) -> None:
+def recipe_main(cfg: TuneRecipeConfig) -> None:
     """
     Entry point for the recipe.
 
@@ -1139,10 +1145,10 @@ def recipe_main(cfg: RLConfig) -> None:
 
     config.log_config(
         recipe_name="FullFinetuneRecipe",
-        cfg=cfg.dict_config() if isinstance(cfg, RLConfig) else cfg,
+        cfg=cfg.dict_config() if isinstance(cfg, TuneRecipeConfig) else cfg,
     )
 
-    recipe = RLRecipe(cfg=cfg)
+    recipe = TuneRecipe(cfg=cfg)
     recipe.setup(cfg=cfg)
     recipe.train()
     recipe.cleanup()
