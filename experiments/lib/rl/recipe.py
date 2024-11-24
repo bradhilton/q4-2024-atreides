@@ -122,6 +122,7 @@ class TuneRecipeConfig(DictConfig):
         clip_grad_norm: Optional[Union[str, float]] = None,
         enable_activation_checkpointing: Optional[bool] = None,
         enable_activation_offloading: Optional[bool] = None,
+        save_intermediate_checkpoints: Optional[bool] = None,
         compile: Optional[bool] = None,
         custom_sharded_layers: Optional[List[str]] = None,
         fsdp_reshard_after_forward: Optional[bool] = None,
@@ -160,6 +161,8 @@ class TuneRecipeConfig(DictConfig):
             self.enable_activation_checkpointing = enable_activation_checkpointing
         if enable_activation_offloading is not None:
             self.enable_activation_offloading = enable_activation_offloading
+        if save_intermediate_checkpoints is not None:
+            self.save_intermediate_checkpoints = save_intermediate_checkpoints
         if compile is not None:
             self.compile = compile
         if custom_sharded_layers is not None:
@@ -413,6 +416,9 @@ class TuneRecipe(FTRecipeInterface):
         self.total_epochs = cfg.epochs
         self.max_steps_per_epoch = cfg.max_steps_per_epoch
         self.global_step = 0
+        self._save_intermediate_checkpoints = cfg.get(
+            "save_intermediate_checkpoints", False
+        )
 
     def load_checkpoint(
         self, cfg_checkpointer: ComponentConfig[Checkpointer]
@@ -841,6 +847,9 @@ class TuneRecipe(FTRecipeInterface):
         checkpoint_dict = {}
 
         intermediate_checkpoint = epoch + 1 < self.total_epochs
+
+        if intermediate_checkpoint and not self._save_intermediate_checkpoints:
+            return
 
         if self._is_rank_zero:
             log.info(

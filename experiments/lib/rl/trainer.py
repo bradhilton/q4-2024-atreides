@@ -130,10 +130,14 @@ class Trainer:
 
     async def train(self, iterations: int, test: bool = False) -> None:
         for _ in range(iterations):
-            _, episodes = await asyncio.gather(self.eval("val", 0), self.explore(1))
+            _, (episodes, _) = await asyncio.gather(
+                self.eval("val", 0, return_exceptions=True),
+                self.explore(1, return_exceptions=True),
+            )
             await self.tune(episodes)
         _, _ = await asyncio.gather(
-            self.eval("val", 0), self.eval("test", 1) if test else asyncio.sleep(0)
+            self.eval("val", 0, return_exceptions=True),
+            self.eval("test", 1) if test else asyncio.sleep(0),
         )
 
     @overload
@@ -214,7 +218,7 @@ class Trainer:
         pbar.total = len(episodes)
         pbar.refresh()
         self.eval_episodes[split] = episodes
-        await asyncio.gather(*tasks)
+        await asyncio.gather(*tasks, return_exceptions=return_exceptions)
         pbar.close()
         score = get_score()
         self.eval_scores[split][self.model] = get_score()
