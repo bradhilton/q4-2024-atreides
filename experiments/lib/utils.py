@@ -115,7 +115,6 @@ def truncate_pad(
         if shape[i] == -1:
             continue
         if shape[i] < input.shape[i]:
-            raise RuntimeError("Truncation is unexpected")
             # Truncate on this dimension
             slicing = [slice(None)] * len(input.shape)
             slicing[i] = slice(0, shape[i])

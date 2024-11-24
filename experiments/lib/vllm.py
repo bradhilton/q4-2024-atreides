@@ -110,6 +110,19 @@ async def start_vllm(
     os.environ.pop("VLLM_LOGGING_CONFIG_PATH", None)
     if os.path.exists(os.path.abspath(model)):
         model = os.path.abspath(model)
+    port = kwargs.get("port") or 8000
+    while True:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind((kwargs.get("host") or "0.0.0.0", port))
+            break
+        except socket.error:
+            if "port" in kwargs and kwargs["port"] == port:
+                raise RuntimeError(f"Port {port} is already in use")
+            port += 1
+        finally:
+            sock.close()
+    kwargs["port"] = port
     args = [
         "vllm",
         "serve",
@@ -120,6 +133,7 @@ async def start_vllm(
         ],
         "--api-key=default",
     ]
+    # os.system("lsof -ti :8000 | xargs kill -9 2>/dev/null || true")
     process = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
@@ -151,7 +165,7 @@ async def start_vllm(
         asyncio.create_task(log_output(process.stderr, sys.stderr))
     client = AsyncOpenAI(
         api_key="default",
-        base_url=f"http://{kwargs.get('host', '0.0.0.0')}:{kwargs.get('port', 8000)}/v1",
+        base_url=f"http://{kwargs.get('host', '0.0.0.0')}:{kwargs["port"]}/v1",
         http_client=DefaultAsyncHttpxClient(
             limits=httpx.Limits(
                 max_connections=max_concurrent_requests * 4,
