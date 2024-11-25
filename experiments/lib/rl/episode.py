@@ -192,6 +192,7 @@ class Episode:
         branch_factor: int,
         max_parallel_splits: int = 1,
         priority: Optional[int] = None,
+        sample_probability_power: float = 1.0,
         split_by: SplitMethod = "count",
         split_separators: Optional[set[str]] = None,
     ) -> bool:
@@ -199,6 +200,7 @@ class Episode:
         parents = self._get_sampleable_parents(
             max_parallel_splits,
             model,
+            sample_probability_power,
             branch_factor > 1,
             split_by,
             split_separators,
@@ -226,6 +228,7 @@ class Episode:
         self,
         max_parallel_splits: int,
         model: str,
+        sample_probability_power: float,
         split: bool,
         split_method: SplitMethod,
         split_separators: Optional[set[str]],
@@ -242,7 +245,7 @@ class Episode:
             ),
             key=lambda c: abs(c.advantage(cache=True, model=model))
             * (c.split_weight(by=split_method) / c.num_token_logprobs())
-            * c.sample_probability(model=model),
+            * c.sample_weight(cache=True, model=model, power=sample_probability_power),
             reverse=True,
         )[:max_parallel_splits]
         for parent in parents:

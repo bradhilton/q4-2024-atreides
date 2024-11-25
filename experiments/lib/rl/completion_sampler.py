@@ -1,7 +1,9 @@
 import asyncio
+import bisect
 from openai import AsyncOpenAI
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.completion_create_params import CompletionCreateParamsBase
+from types import TracebackType
 from typing import (
     Any,
     cast,
@@ -19,23 +21,100 @@ class Kwargs(CompletionCreateParamsBase, total=False):
     extra_body: dict[str, Any]
 
 
+class ThrottledPrioritySemaphore:
+    def __init__(
+        self,
+        max_concurrent_actions: int = 2**31 - 1,
+        min_time_between_actions: float = 0.0,
+    ) -> None:
+        self.max_concurrent_actions = max_concurrent_actions
+        self.min_time_between_actions = min_time_between_actions
+        self.concurrent_actions = 0
+        self.last_action_time = asyncio.get_event_loop().time()
+        self.queue: list[tuple[asyncio.Event, float]] = []
+        self.task: asyncio.Task = asyncio.create_task(self._wait())
+
+    def __call__(self, priority: float) -> "ThrottledPrioritySemaphoreContextManager":
+        return ThrottledPrioritySemaphoreContextManager(self, priority)
+
+    async def acquire(self, priority: float) -> None:
+        event = asyncio.Event()
+        bisect.insort(self.queue, (event, priority), key=lambda x: x[1])
+        self._wait_if_needed()
+        await event.wait()
+        self.concurrent_actions += 1
+
+    def release(self) -> None:
+        self.concurrent_actions -= 1
+        self._wait_if_needed()
+
+    def _wait_if_needed(self) -> None:
+        if (
+            self.queue
+            and self.concurrent_actions < self.max_concurrent_actions
+            and self.task.done()
+        ):
+            self.task = asyncio.create_task(self._wait())
+
+    async def _wait(self) -> None:
+        await asyncio.sleep(
+            max(
+                0,
+                self.last_action_time
+                + self.min_time_between_actions
+                - asyncio.get_event_loop().time(),
+            )
+        )
+        self.last_action_time = asyncio.get_event_loop().time()
+        if self.queue and self.concurrent_actions < self.max_concurrent_actions:
+            event, _ = self.queue.pop(0)
+            event.set()
+
+
+class ThrottledPrioritySemaphoreContextManager:
+    def __init__(
+        self,
+        semaphore: ThrottledPrioritySemaphore,
+        priority: float,
+    ) -> None:
+        self.semaphore = semaphore
+        self.priority = priority
+
+    async def __aenter__(self) -> None:
+        await self.semaphore.acquire(self.priority)
+
+    async def __aexit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc_value: Optional[BaseException],
+        traceback: Optional[TracebackType],
+    ) -> None:
+        self.semaphore.release()
+
+
 class CompletionSampler:
     def __init__(
         self,
         client: AsyncOpenAI,
         max_concurrent_requests: int = 2**31 - 1,
+        min_time_between_requests: float = 0.0,
         **kwargs: Unpack[Kwargs],
     ) -> None:
         self.client = client
-        self.semaphore = asyncio.Semaphore(max_concurrent_requests)
+        self.semaphore = ThrottledPrioritySemaphore(
+            max_concurrent_requests,
+            min_time_between_requests,
+        )
         self.kwargs = kwargs
         self.model = kwargs.get("model")
+        self.queue: list[asyncio.Event] = []
 
     async def sample_completions(
         self,
         parent: Completion,
         continue_last_message_if_assistant: bool = True,
         strip: set[str] = set(),
+        priority: float = 0.0,
         **kwargs: Unpack[Kwargs],
     ) -> list[Completion]:
         messages = parent.all_message_params()
@@ -100,7 +179,7 @@ class CompletionSampler:
         if not "model" in untyped_kwargs:
             untyped_kwargs["model"] = await self.get_model()
 
-        async with self.semaphore:
+        async with self.semaphore(priority or 0):
             chat_completion = cast(
                 ChatCompletion,
                 await self.client.chat.completions.create(**untyped_kwargs),

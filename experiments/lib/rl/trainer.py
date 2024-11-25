@@ -26,6 +26,7 @@ from typing import (
     Union,
 )
 
+from .completion import SplitMethod
 from .completion_sampler import CompletionSampler
 from .episode import Episode
 from .pack import PackedDataset, packed_tensors, packed_tensors_to_dir, PackedTensors
@@ -46,6 +47,9 @@ class Trainer:
         output_dir: str,
         samples_per_episode: Optional[int] = None,
         branch_factor: int = 2,
+        sample_probability_power: float = 1.0,
+        split_method: SplitMethod = "count",
+        split_separators: Optional[set[str]] = None,
         train_episodes: Episodes,
         episodes_per_iteration: Optional[int] = None,
         val_episodes: Optional[Episodes] = None,
@@ -63,6 +67,7 @@ class Trainer:
         vllm_env: Optional[dict[str, str]] = None,
         vllm_kwargs: Optional[dict[str, Any]] = None,
         vllm_max_concurrent_requests: int = 128,
+        vllm_min_time_between_requests: float = 0.0,
         vllm_timeout: float = 120.0,
     ) -> None:
         self.output_dir = os.path.abspath(output_dir)
@@ -88,6 +93,9 @@ class Trainer:
         self.base_model_checkpoint_files = base_model_checkpoint_files
         self.samples_per_episode = samples_per_episode or branch_factor
         self.branch_factor = branch_factor
+        self.completion_sample_probability_power = sample_probability_power
+        self.split_by: SplitMethod = split_method
+        self.split_separators = split_separators
         self._train_iterator = ait.cycle(train_episodes)
         self._first_train_episode: Optional[Episode] = None
         self.episodes_per_iteration: Optional[int] = (
@@ -114,6 +122,7 @@ class Trainer:
         self.vllm_kwargs["env"] = vllm_env
         self.vllm_kwargs["timeout"] = vllm_timeout
         self.vllm_max_concurrent_requests = vllm_max_concurrent_requests
+        self.vllm_min_time_between_requests = vllm_min_time_between_requests
         self._vllm_task: Optional[asyncio.Task[vLLM]] = None
         self._completion_sampler: Optional[CompletionSampler] = None
         self.tokenizer = Tokenizer(base_model)
@@ -307,6 +316,10 @@ class Trainer:
                 max_parallel_splits=int(
                     math.ceil(remaining_samples / (self.branch_factor - 1))
                 ),
+                priority=priority,
+                sample_probability_power=self.completion_sample_probability_power,
+                split_by=self.split_by,
+                split_separators=self.split_separators,
             ):
                 break
             if frac == 1.0 and all(
@@ -340,6 +353,7 @@ class Trainer:
         tensors = packed_tensors(
             episodes,
             model=self.model,
+            sample_probability_power=self.completion_sample_probability_power,
             sequence_length=self.tune_sequence_length,
             trajectories_per_episode=(
                 int(self.samples_per_episode * self.tune_episode_sample_fraction)
@@ -430,40 +444,6 @@ class Trainer:
             recipe_main(self.tune_recipe_config)
         self.save(checkpoint_dir)
 
-    async def tune_resources(
-        self, episodes: list[Episode]
-    ) -> tuple[PackedTensors, str, list[str]]:
-        await self.stop_vllm()
-        tensors = packed_tensors(
-            episodes,
-            model=self.model,
-            sequence_length=self.tune_sequence_length,
-            trajectories_per_episode=(
-                int(self.samples_per_episode * self.tune_episode_sample_fraction)
-                if self.tune_episode_sample_fraction < 1.0
-                else None
-            ),
-            tokenizer=self.tokenizer,
-        )
-        if os.path.exists(os.path.abspath(self.model)):
-            checkpoint_dir = os.path.abspath(self.model)
-            checkpoint_files = None
-        else:
-            process = await asyncio.create_subprocess_shell(
-                f"HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download {self.model}",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await process.communicate()
-            checkpoint_dir = stdout.decode().strip()
-            checkpoint_files = self.base_model_checkpoint_files
-        checkpoint_files = checkpoint_files or [
-            file
-            for ext in ["safetensors", "pt", "ckpt", "bin", "pth"]
-            for file in glob.glob(f"{checkpoint_dir}/*.{ext}")
-        ]
-        return tensors, checkpoint_dir, checkpoint_files
-
     def save(self, base_checkpoint_dir: str) -> None:
         # Find the latest epoch number from model checkpoint files
         epoch = max(
@@ -535,6 +515,7 @@ class Trainer:
         self._completion_sampler = CompletionSampler(
             vllm.client,
             max_concurrent_requests=self.vllm_max_concurrent_requests,
+            min_time_between_requests=self.vllm_min_time_between_requests,
             model=self.model,
         )
         return self._completion_sampler

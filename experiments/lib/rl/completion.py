@@ -82,7 +82,7 @@ class Completion:
         self.model = model
         self.fork = fork
         self._cached_values: dict[tuple[Optional[str], Optional[bool]], float] = {}
-        self._cached_sample_probabilities: dict[Optional[str], float] = {}
+        self._cached_sample_weights: dict[tuple[Optional[str], float], float] = {}
         self._cached_tokens: Optional[torch.Tensor] = None
         for child in self.children:
             if child.parent is not self:
@@ -101,13 +101,13 @@ class Completion:
         if reward is not None:
             self.reward = reward
             self._cached_values = {}
-            self._cached_sample_probabilities = {}
+            self._cached_sample_weights = {}
         if not self.parent:
             return
         self.parent.commit()
         self.parent.children.add(self)
         self.parent._cached_values = {}
-        self.parent._cached_sample_probabilities = {}
+        self.parent._cached_sample_weights = {}
 
     def value(
         self,
@@ -205,22 +205,25 @@ class Completion:
         if reverse and including_self:
             yield self
 
+    def matches_model(self, model: Optional[str]) -> bool:
+        return not model or not self.model or self.model == model
+
     def descendants(
         self, including_self: bool = False, model: Optional[str] = None
     ) -> Iterable["Completion"]:
-        if including_self and (model is None or self.model == model):
+        if including_self and self.matches_model(model):
             yield self
         for child in self.children:
             yield from child.descendants(including_self=True, model=model)
 
     def leaves(self, model: Optional[str] = None) -> Iterable["Completion"]:
-        if not self.children and (model is None or self.model == model):
+        if not self.children and self.matches_model(model):
             yield self
         for child in self.children:
             yield from child.leaves(model=model)
 
     def depths(self, depth: int = 0, model: Optional[str] = None) -> Iterable[int]:
-        if model is None or self.model == model:
+        if self.matches_model(model):
             yield depth
         for child in self.children:
             yield from child.depths(depth + 1, model=model)
@@ -367,32 +370,22 @@ class Completion:
             self._cached_tokens = tokens
         return tokens
 
-    def sample_probability(
-        self, cache: bool = False, model: Optional[str] = None
+    def sample_weight(
+        self, cache: bool = False, model: Optional[str] = None, power: float = 1.0
     ) -> float:
-        if cache and model in self._cached_sample_probabilities:
-            return self._cached_sample_probabilities[model]
-        if not self.sampleable(model):
-            probability = 0.0
-        elif not self.parent:
-            probability = 1.0
-        else:
-            probability = self.parent.sample_probability(
-                cache=cache, model=model
-            ) / sum(child.sampleable(model) for child in self.parent.children)
+        if not self.matches_model(model):
+            return 0.0
+        if not self.parent or not power:
+            return 1.0
+        if cache and (model, power) in self._cached_sample_weights:
+            return self._cached_sample_weights[(model, power)]
+        weight = (
+            self.parent.sample_weight(cache=cache, model=model, power=power)
+            / sum(child.matches_model(model) for child in self.parent.children)
+        ) ** power
         if cache:
-            self._cached_sample_probabilities[model] = probability
-        return probability
-
-    def sampleable(self, model: Optional[str]) -> bool:
-        return not self.model or not model or self.model == model
-
-    def sample_terminus(self, model: Optional[str] = None) -> "Completion":
-        children = [child for child in self.children if child.sampleable(model)]
-        if not children:
-            return self
-        else:
-            return random.choice(children).sample_terminus(model=model)
+            self._cached_sample_weights[(model, power)] = weight
+        return weight
 
     def can_split(self, by: SplitMethod, separators: Optional[set[str]] = None) -> bool:
         positive_weights = 0

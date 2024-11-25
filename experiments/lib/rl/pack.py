@@ -1,8 +1,9 @@
 from collections import Counter
 import os
+import random
 import torch
 from torch.utils.data import Dataset
-from typing import Any, Optional, TypedDict, Unpack
+from typing import Optional, TypedDict, Unpack
 
 from .completion import Completion
 from .episode import Episode
@@ -74,13 +75,19 @@ def packed_tensors_to_dir(tensors: PackedTensors, dir: str) -> DiskPackedTensors
 def packed_tensors(
     episodes: list[Episode],
     model: str,
+    sample_probability_power: float,
     sequence_length: int,
-    trajectories_per_episode: Optional[int],
     tokenizer: Tokenizer,
+    trajectories_per_episode: Optional[int],
 ) -> PackedTensors:
     with Timer("Packed sequences"):
         sequences, completion_weights = packed_sequences(
-            episodes, model, sequence_length, trajectories_per_episode, tokenizer
+            episodes,
+            model,
+            sample_probability_power,
+            sequence_length,
+            tokenizer,
+            trajectories_per_episode,
         )
     max_ancestors = max(episode.completion.max_depth(model) for episode in episodes) + 1
     with Timer("Prepared tensors"):
@@ -139,28 +146,37 @@ def packed_tensors(
 def packed_sequences(
     episodes: list[Episode],
     model: str,
+    sample_probability_power: float,
     sequence_length: int,
-    trajectories_per_episode: Optional[int],
     tokenizer: Tokenizer,
+    trajectories_per_episode: Optional[int],
 ) -> tuple[list[list[Completion]], dict[Completion, float]]:
     sequences: list[Counter[Completion]] = []
     completions: Counter[Completion] = Counter()
     for episode in episodes:
         termini: list[Completion] = []
-        for terminus in (
-            (
-                episode.completion.sample_terminus(model=model)
-                for _ in range(trajectories_per_episode)
+        possible_termini = episode.completion.leaves(model=model)
+        if trajectories_per_episode is not None:
+            possible_termini = list(possible_termini)
+            possible_termini = random.choices(
+                possible_termini,
+                weights=[
+                    leaf.sample_weight(
+                        cache=True, model=model, power=sample_probability_power
+                    )
+                    for leaf in possible_termini
+                ],
+                k=trajectories_per_episode,
             )
-            if trajectories_per_episode is not None
-            else episode.completion.leaves(model=model)
-        ):
+        for terminus in possible_termini:
             for terminus in terminus.ancestors(including_self=True):
                 if (
                     terminus.advantage(cache=True, model=model) != 0
                     and len(terminus.tokens(tokenizer, cache=True)) <= sequence_length
                 ):
                     break
+            else:
+                continue
             termini.append(terminus)
         for terminus in termini:
             while True:
@@ -192,7 +208,9 @@ def packed_sequences(
                 (
                     total_occurances[completion]
                     if trajectories_per_episode is not None
-                    else completion.sample_probability(cache=True, model=model)
+                    else completion.sample_weight(
+                        cache=True, model=model, power=sample_probability_power
+                    )
                 )
                 / sequence_occurences[completion]
             )
