@@ -55,7 +55,7 @@ class EpisodeCompletion:
     ) -> "EpisodeCompletion":
         completions = await self._sampler.sample_completions(
             Completion(parent=self._completion, messages=messages),
-            extra_body={"priority": self._priority or 0},
+            priority=self._priority or 0,
         )
         return EpisodeCompletion(_completion=completions[0], _sampler=self._sampler)
 
@@ -271,8 +271,8 @@ class Episode:
         completions = await completion_sampler.sample_completions(
             parent,
             strip=split_separators,
+            priority=priority or 0,
             n=n,
-            extra_body={"priority": priority or 0},
         )
         if num_children:
             for completion in completions:

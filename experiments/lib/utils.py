@@ -2,7 +2,7 @@ import black
 from collections import deque
 import time
 import torch
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, ParamSpec, Sequence, TypeVar, Union
 
 
 def black_print(
@@ -66,6 +66,29 @@ def read_last_n_lines(filename: str, n: int) -> str:
             lines[0] = chunk[chunk.rindex("\n") + 1 :] + lines[0]
 
     return "\n".join(lines)
+
+
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+def return_exception(callable: Callable[P, T]) -> Callable[P, Union[T, BaseException]]:
+    """Decorator to return exception instead of raising it.
+
+    Args:
+        callable: Function to decorate
+
+    Returns:
+        Decorated function that returns exception instead of raising it
+    """
+
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> Union[T, BaseException]:
+        try:
+            return callable(*args, **kwargs)
+        except BaseException as exception:
+            return exception
+
+    return wrapper
 
 
 class Timer:

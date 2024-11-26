@@ -1,6 +1,7 @@
 from aioitertools.builtins import iter, enumerate as aenumerate
 from aioitertools import itertools as ait
 from aioitertools.helpers import maybe_await
+from aioitertools.types import AnyIterable
 import asyncio
 import glob
 import math
@@ -35,7 +36,10 @@ from ..tokenizer import Tokenizer
 from ..vllm import start_vllm, vLLM
 
 
-Episodes = Union[Iterable[Episode], AsyncIterable[Episode]]
+Episodes = Union[
+    Iterable[Union[Episode, BaseException]],
+    AsyncIterable[Union[Episode, BaseException]],
+]
 
 
 class Trainer:
@@ -66,7 +70,7 @@ class Trainer:
         tune_sequence_length: int = 8192,
         vllm_env: Optional[dict[str, str]] = None,
         vllm_kwargs: Optional[dict[str, Any]] = None,
-        vllm_max_concurrent_requests: int = 128,
+        vllm_max_concurrent_samples: int = 128,
         vllm_min_time_between_requests: float = 0.0,
         vllm_timeout: float = 120.0,
     ) -> None:
@@ -121,7 +125,7 @@ class Trainer:
         self.vllm_kwargs = vllm_kwargs or {}
         self.vllm_kwargs["env"] = vllm_env
         self.vllm_kwargs["timeout"] = vllm_timeout
-        self.vllm_max_concurrent_requests = vllm_max_concurrent_requests
+        self.vllm_max_concurrent_requests = vllm_max_concurrent_samples
         self.vllm_min_time_between_requests = vllm_min_time_between_requests
         self._vllm_task: Optional[asyncio.Task[vLLM]] = None
         self._completion_sampler: Optional[CompletionSampler] = None
@@ -165,15 +169,15 @@ class Trainer:
         pbar_position: Optional[int] = None,
         *,
         return_exceptions: Literal[True] = True,
-    ) -> tuple[Optional[float], list[Exception]]: ...
+    ) -> tuple[Optional[float], list[BaseException]]: ...
 
     async def eval(
         self,
         split: Literal["val", "test"],
         pbar_position: Optional[int] = None,
         *,
-        return_exceptions: bool = False,
-    ) -> Union[Optional[float], tuple[Optional[float], list[Exception]]]:
+        return_exceptions: bool = True,
+    ) -> Union[Optional[float], tuple[Optional[float], list[BaseException]]]:
         if self.eval_episodes[split] is None:
             if return_exceptions:
                 return None, []
@@ -188,7 +192,7 @@ class Trainer:
         )
         tasks: list[asyncio.Task] = []
         episodes: list[Episode] = []
-        exceptions: list[Exception] = []
+        exceptions: list[BaseException] = []
 
         def get_score() -> float:
             return sum(
@@ -214,7 +218,15 @@ class Trainer:
                 exceptions.append(exception)
             pbar.set_postfix(avg=get_score(), exceptions=len(exceptions))
 
-        async for episode in iter(self.eval_episodes[split] or ()):
+        async for episode in iter(
+            self.eval_episodes[split] or (),
+        ):
+            if isinstance(episode, BaseException):
+                if return_exceptions:
+                    exceptions.append(episode)
+                    continue
+                else:
+                    raise episode
             episodes.append(episode)
             task = asyncio.create_task(
                 episode.sample_completions_v2(
@@ -224,6 +236,7 @@ class Trainer:
             )
             task.add_done_callback(done_callback)
             tasks.append(task)
+            await asyncio.sleep(1e-6)
         pbar.total = len(episodes)
         pbar.refresh()
         self.eval_episodes[split] = episodes
@@ -238,7 +251,7 @@ class Trainer:
     @overload
     async def explore(
         self, pbar_position: Optional[int] = None, *, return_exceptions: Literal[True]
-    ) -> tuple[list[Episode], list[Exception]]: ...
+    ) -> tuple[list[Episode], list[BaseException]]: ...
 
     @overload
     async def explore(
@@ -249,8 +262,8 @@ class Trainer:
     ) -> list[Episode]: ...
 
     async def explore(
-        self, pbar_position: Optional[int] = None, *, return_exceptions: bool = False
-    ) -> Union[list[Episode], tuple[list[Episode], list[Exception]]]:
+        self, pbar_position: Optional[int] = None, *, return_exceptions: bool = True
+    ) -> Union[list[Episode], tuple[list[Episode], list[BaseException]]]:
         await self.get_completion_sampler()
         pbar = self.tqdm(
             desc="explore",
@@ -262,9 +275,16 @@ class Trainer:
         pbar.set_postfix(completed=0, exceptions=0)
         tasks: list[asyncio.Task[Episode]] = []
         num_episodes: int = 0
-        async for priority, episode in aenumerate(
-            ait.islice(self._train_iterator, self.episodes_per_iteration)
+        exceptions: list[BaseException] = []
+        async for priority, episode in iter(
+            aenumerate(ait.islice(self._train_iterator, self.episodes_per_iteration))
         ):
+            if isinstance(episode, BaseException):
+                if return_exceptions:
+                    exceptions.append(episode)
+                    continue
+                else:
+                    raise episode
             if not self._first_train_episode:
                 self._first_train_episode = episode
             elif (
@@ -275,17 +295,17 @@ class Trainer:
             num_episodes += 1
             task = asyncio.create_task(self._explore_episode(episode, pbar, priority))
             tasks.append(task)
+            await asyncio.sleep(1e-6)
         if self.episodes_per_iteration is None:
             self.episodes_per_iteration = num_episodes
             pbar.total = num_episodes
             pbar.refresh()
         episodes = []
-        exceptions: list[Exception] = []
         for future in asyncio.as_completed(tasks):
             try:
                 episode = await future
                 episodes.append(episode)
-            except Exception as exception:
+            except BaseException as exception:
                 exceptions.append(exception)
             pbar.set_postfix(completed=len(episodes), exceptions=len(exceptions))
         pbar.n = len(episodes)
@@ -322,6 +342,7 @@ class Trainer:
                 split_separators=self.split_separators,
             ):
                 break
+            await asyncio.sleep(1e-6)
             if frac == 1.0 and all(
                 c.advantage(cache=True) == 0
                 for c in episode.completion.children
@@ -514,7 +535,7 @@ class Trainer:
         vllm = await self.get_or_start_vllm()
         self._completion_sampler = CompletionSampler(
             vllm.client,
-            max_concurrent_requests=self.vllm_max_concurrent_requests,
+            max_concurrent_samples=self.vllm_max_concurrent_requests,
             min_time_between_requests=self.vllm_min_time_between_requests,
             model=self.model,
         )

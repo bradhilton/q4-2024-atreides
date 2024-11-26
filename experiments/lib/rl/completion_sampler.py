@@ -34,18 +34,21 @@ class ThrottledPrioritySemaphore:
         self.queue: list[tuple[asyncio.Event, float]] = []
         self.task: asyncio.Task = asyncio.create_task(self._wait())
 
-    def __call__(self, priority: float) -> "ThrottledPrioritySemaphoreContextManager":
-        return ThrottledPrioritySemaphoreContextManager(self, priority)
+    def __call__(
+        self, n: int = 1, priority: float = 0.0
+    ) -> "ThrottledPrioritySemaphoreContextManager":
+        return ThrottledPrioritySemaphoreContextManager(self, n, priority)
 
-    async def acquire(self, priority: float) -> None:
+    async def acquire(self, n: int = 1, priority: float = 0.0) -> None:
         event = asyncio.Event()
         bisect.insort(self.queue, (event, priority), key=lambda x: x[1])
         self._wait_if_needed()
         await event.wait()
-        self.concurrent_actions += 1
+        self.concurrent_actions += n
+        self._wait_if_needed()
 
-    def release(self) -> None:
-        self.concurrent_actions -= 1
+    def release(self, n: int = 1) -> None:
+        self.concurrent_actions -= n
         self._wait_if_needed()
 
     def _wait_if_needed(self) -> None:
@@ -75,13 +78,15 @@ class ThrottledPrioritySemaphoreContextManager:
     def __init__(
         self,
         semaphore: ThrottledPrioritySemaphore,
+        n: int,
         priority: float,
     ) -> None:
         self.semaphore = semaphore
+        self.n = n
         self.priority = priority
 
     async def __aenter__(self) -> None:
-        await self.semaphore.acquire(self.priority)
+        await self.semaphore.acquire(self.n, self.priority)
 
     async def __aexit__(
         self,
@@ -89,20 +94,20 @@ class ThrottledPrioritySemaphoreContextManager:
         exc_value: Optional[BaseException],
         traceback: Optional[TracebackType],
     ) -> None:
-        self.semaphore.release()
+        self.semaphore.release(self.n)
 
 
 class CompletionSampler:
     def __init__(
         self,
         client: AsyncOpenAI,
-        max_concurrent_requests: int = 2**31 - 1,
+        max_concurrent_samples: int = 2**31 - 1,
         min_time_between_requests: float = 0.0,
         **kwargs: Unpack[Kwargs],
     ) -> None:
         self.client = client
         self.semaphore = ThrottledPrioritySemaphore(
-            max_concurrent_requests,
+            max_concurrent_samples,
             min_time_between_requests,
         )
         self.kwargs = kwargs
@@ -179,7 +184,7 @@ class CompletionSampler:
         if not "model" in untyped_kwargs:
             untyped_kwargs["model"] = await self.get_model()
 
-        async with self.semaphore(priority or 0):
+        async with self.semaphore(untyped_kwargs.get("n", 1), priority or 0):
             chat_completion = cast(
                 ChatCompletion,
                 await self.client.chat.completions.create(**untyped_kwargs),
