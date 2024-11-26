@@ -202,16 +202,17 @@ async def start_vllms(
     **kwargs: Any,
 ) -> list[vLLM]:
     ports: list[int] = []
-    port = kwargs.pop("port") or 8000
+    port = kwargs.pop("port", None) or 8000
     while len(ports) < n:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.bind((kwargs.get("host") or "0.0.0.0", port))
             ports.append(port)
         except socket.error:
-            port += 1
+            pass
         finally:
             sock.close()
+            port += 1
     env = env or {}
     devices: list[int] = [
         int(device)
@@ -223,17 +224,19 @@ async def start_vllms(
     visible_devices = [
         ",".join(str(device) for device in devices[i::n]) for i in range(n)
     ]
-    return [
-        await start_vllm(
-            model,
-            timeout,
-            {**env, "CUDA_VISIBLE_DEVICES": cuda_visible_devices},
-            max_concurrent_requests,
-            port=port,
-            **kwargs,
+    return await asyncio.gather(
+        *(
+            start_vllm(
+                model,
+                timeout,
+                {**env, "CUDA_VISIBLE_DEVICES": cuda_visible_devices},
+                max_concurrent_requests,
+                port=port,
+                **kwargs,
+            )
+            for port, cuda_visible_devices in zip(ports, visible_devices)
         )
-        for port, cuda_visible_devices in zip(ports, visible_devices)
-    ]
+    )
 
 
 def vllm_server_metrics(last_n_lines: int = 5) -> tuple[int, int]:

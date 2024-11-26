@@ -55,6 +55,7 @@ class Trainer:
         split_separators: Optional[set[str]] = None,
         train_episodes: Episodes,
         episodes_per_iteration: Optional[int] = None,
+        patience_per_sample: float = 1.0,
         val_episodes: Optional[Episodes] = None,
         val_samples_per_episode: int = 1,
         test_episodes: Optional[Episodes] = None,
@@ -105,6 +106,7 @@ class Trainer:
         self.episodes_per_iteration: Optional[int] = (
             episodes_per_iteration or getattr(train_episodes, "__len__", lambda: None)()
         )
+        self.patience_per_sample = patience_per_sample
         self.eval_episodes = {
             "val": val_episodes,
             "test": test_episodes,
@@ -303,9 +305,18 @@ class Trainer:
             pbar.refresh()
         episodes = []
         for future in asyncio.as_completed(tasks):
+            remaining_samples = self.samples_per_episode * (pbar.total - pbar.n)
+            patience = self.patience_per_sample * remaining_samples
             try:
-                episode = await future
+                episode = await asyncio.wait_for(future, timeout=patience)
                 episodes.append(episode)
+            except asyncio.TimeoutError:
+                print(
+                    f"Early stopping exploration due to expired patience ({remaining_samples} remaining samples x {self.patience_per_sample} patience per sample = {patience} seconds)"
+                )
+                for task in tasks:
+                    task.cancel()
+                break
             except BaseException as exception:
                 exceptions.append(exception)
             pbar.set_postfix(completed=len(episodes), exceptions=len(exceptions))
