@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "accelerate>=1.0.1",
     "aioitertools>=0.12.0",
-    "bitsandbytes==0.42.0",
+    "bitsandbytes>=0.44.1",
     "black>=24.10.0",
     "datasets>=3.0.1",
     "fairscale>=0.4.13",
@@ -24,7 +24,7 @@ dependencies = [
     "tokenizers>=0.20.0",
     "torch>=2.4.0",
     "torchao>=0.6.1",
-    "torchtune",
+    "torchtune>=0.4.0",
     "tqdm>=4.66.5",
     "vllm>=0.6.3",
     "wandb>=0.18.3",
@@ -35,6 +35,3 @@ dev-dependencies = [
     "ipykernel>=6.29.5",
     "ipywidgets>=8.1.5",
 ]
-
-[tool.uv.sources]
-torchtune = { git = "https://github.com/pytorch/torchtune", rev = "4b6877a6ef31a1f987c27594eaf8fe467b5ab785" }
