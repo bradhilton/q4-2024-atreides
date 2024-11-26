@@ -29,7 +29,8 @@ from typing import (
 from .completion import SplitMethod
 from .completion_sampler import CompletionSampler, CompletionSamplerPool
 from .episode import Episode
-from .pack import PackedDataset, packed_tensors, packed_tensors_to_dir
+from .explore_result import ExploreResult
+from .pack import packed_tensors, PackedDataset, PackedTensors, packed_tensors_to_dir
 from .recipe import ComponentConfig, recipe_main, TuneRecipeConfig
 from ..tokenizer import Tokenizer
 from ..vllm import start_vllms, vLLM
@@ -56,6 +57,7 @@ class Trainer:
         train_episodes: Episodes,
         episodes_per_iteration: Optional[int] = None,
         patience_per_sample: float = 1.0,
+        max_mask_sequence_batch_size: Optional[int] = None,
         val_episodes: Optional[Episodes] = None,
         val_samples_per_episode: int = 1,
         test_episodes: Optional[Episodes] = None,
@@ -107,6 +109,9 @@ class Trainer:
             episodes_per_iteration or getattr(train_episodes, "__len__", lambda: None)()
         )
         self.patience_per_sample = patience_per_sample
+        self.max_mask_sequence_batch_size = max_mask_sequence_batch_size or max(
+            32768 // tune_sequence_length, 1
+        )
         self.eval_episodes = {
             "val": val_episodes,
             "test": test_episodes,
@@ -146,11 +151,11 @@ class Trainer:
 
     async def train(self, iterations: int, test: bool = False) -> None:
         for _ in range(iterations):
-            _, (episodes, _) = await asyncio.gather(
+            _, result = await asyncio.gather(
                 self.eval("val", 0, return_exceptions=True),
                 self.explore(1, return_exceptions=True),
             )
-            await self.tune(episodes)
+            await self.tune(result.episodes)
         _, _ = await asyncio.gather(
             self.eval("val", 0, return_exceptions=True),
             self.eval("test", 1) if test else asyncio.sleep(0),
@@ -251,22 +256,9 @@ class Trainer:
             return score, exceptions
         return score
 
-    @overload
-    async def explore(
-        self, pbar_position: Optional[int] = None, *, return_exceptions: Literal[True]
-    ) -> tuple[list[Episode], list[BaseException]]: ...
-
-    @overload
-    async def explore(
-        self,
-        pbar_position: Optional[int] = None,
-        *,
-        return_exceptions: Literal[False] = False,
-    ) -> list[Episode]: ...
-
     async def explore(
         self, pbar_position: Optional[int] = None, *, return_exceptions: bool = True
-    ) -> Union[list[Episode], tuple[list[Episode], list[BaseException]]]:
+    ) -> ExploreResult:
         await self.get_completion_sampler()
         pbar = self.tqdm(
             desc="explore",
@@ -277,14 +269,26 @@ class Trainer:
         )
         pbar.set_postfix(completed=0, exceptions=0)
         tasks: list[asyncio.Task[Episode]] = []
-        num_episodes: int = 0
-        exceptions: list[BaseException] = []
+        result = ExploreResult(
+            pbar=pbar,
+            max_mask_sequence_batch_size=self.max_mask_sequence_batch_size,
+            model=self.model,
+            sample_probability_power=self.completion_sample_probability_power,
+            sequence_length=self.tune_sequence_length,
+            tensor_dir=self.output_dir + "/tensors",
+            tokenizer=self.tokenizer,
+            trajectories_per_episode=(
+                int(self.samples_per_episode * self.tune_episode_sample_fraction)
+                if self.tune_episode_sample_fraction < 1.0
+                else None
+            ),
+        )
         async for priority, episode in iter(
             aenumerate(ait.islice(self._train_iterator, self.episodes_per_iteration))
         ):
             if isinstance(episode, BaseException):
                 if return_exceptions:
-                    exceptions.append(episode)
+                    result.add_exception(episode)
                     continue
                 else:
                     raise episode
@@ -295,21 +299,19 @@ class Trainer:
             ):
                 self._train_iterator = ait.chain([episode], self._train_iterator)
                 break
-            num_episodes += 1
             task = asyncio.create_task(self._explore_episode(episode, pbar, priority))
+            task.add_done_callback(result.done_callback)
             tasks.append(task)
-            await asyncio.sleep(1e-6)
-        if self.episodes_per_iteration is None:
-            self.episodes_per_iteration = num_episodes
-            pbar.total = num_episodes
-            pbar.refresh()
-        episodes = []
+            if self.episodes_per_iteration is None:
+                self.episodes_per_iteration = len(tasks)
+                pbar.total = len(tasks)
+                pbar.refresh()
+            await asyncio.sleep(1e-6)  # yield to other tasks
         for future in asyncio.as_completed(tasks):
             remaining_samples = self.samples_per_episode * (pbar.total - pbar.n)
             patience = self.patience_per_sample * remaining_samples
             try:
-                episode = await asyncio.wait_for(future, timeout=patience)
-                episodes.append(episode)
+                await asyncio.wait_for(future, timeout=patience)
             except asyncio.TimeoutError:
                 print(
                     f"Early stopping exploration due to expired patience ({remaining_samples} remaining samples x {self.patience_per_sample} patience per sample = {patience} seconds)"
@@ -318,13 +320,11 @@ class Trainer:
                     task.cancel()
                 break
             except BaseException as exception:
-                exceptions.append(exception)
-            pbar.set_postfix(completed=len(episodes), exceptions=len(exceptions))
-        pbar.n = len(episodes)
-        pbar.close()
-        if return_exceptions:
-            return episodes, exceptions
-        return episodes
+                if return_exceptions:
+                    result.add_exception(exception)
+                else:
+                    raise exception
+        return result.completed()
 
     async def _explore_episode(
         self, episode: Episode, pbar: tqdm, priority: int
@@ -380,6 +380,20 @@ class Trainer:
                 return await self._explore_episode(substitute, pbar, priority)
         pbar.update(frac or 0)
         return episode
+
+    def tensors(self, episodes: list[Episode]) -> PackedTensors:
+        return packed_tensors(
+            episodes,
+            model=self.model,
+            sample_probability_power=self.completion_sample_probability_power,
+            sequence_length=self.tune_sequence_length,
+            trajectories_per_episode=(
+                int(self.samples_per_episode * self.tune_episode_sample_fraction)
+                if self.tune_episode_sample_fraction < 1.0
+                else None
+            ),
+            tokenizer=self.tokenizer,
+        )
 
     async def tune(self, episodes: list[Episode]) -> None:
         await self.stop_vllms()
