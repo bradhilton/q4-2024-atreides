@@ -1,7 +1,6 @@
 from aioitertools.builtins import iter, enumerate as aenumerate
 from aioitertools import itertools as ait
 from aioitertools.helpers import maybe_await
-from aioitertools.types import AnyIterable
 import asyncio
 import glob
 import math
@@ -28,12 +27,12 @@ from typing import (
 )
 
 from .completion import SplitMethod
-from .completion_sampler import CompletionSampler
+from .completion_sampler import CompletionSampler, CompletionSamplerPool
 from .episode import Episode
-from .pack import PackedDataset, packed_tensors, packed_tensors_to_dir, PackedTensors
+from .pack import PackedDataset, packed_tensors, packed_tensors_to_dir
 from .recipe import ComponentConfig, recipe_main, TuneRecipeConfig
 from ..tokenizer import Tokenizer
-from ..vllm import start_vllm, vLLM
+from ..vllm import start_vllms, vLLM
 
 
 Episodes = Union[
@@ -72,6 +71,7 @@ class Trainer:
         vllm_kwargs: Optional[dict[str, Any]] = None,
         vllm_max_concurrent_samples: int = 128,
         vllm_min_time_between_requests: float = 0.0,
+        vllm_num: int = 1,
         vllm_timeout: float = 120.0,
     ) -> None:
         self.output_dir = os.path.abspath(output_dir)
@@ -127,7 +127,8 @@ class Trainer:
         self.vllm_kwargs["timeout"] = vllm_timeout
         self.vllm_max_concurrent_requests = vllm_max_concurrent_samples
         self.vllm_min_time_between_requests = vllm_min_time_between_requests
-        self._vllm_task: Optional[asyncio.Task[vLLM]] = None
+        self.vllm_num = vllm_num
+        self._vllm_task: Optional[asyncio.Task[list[vLLM]]] = None
         self._completion_sampler: Optional[CompletionSampler] = None
         self.tokenizer = Tokenizer(base_model)
         self._substitute_episodes: dict[Episode, Episode] = {}
@@ -370,7 +371,7 @@ class Trainer:
         return episode
 
     async def tune(self, episodes: list[Episode]) -> None:
-        await self.stop_vllm()
+        await self.stop_vllms()
         tensors = packed_tensors(
             episodes,
             model=self.model,
@@ -532,20 +533,26 @@ class Trainer:
             self._completion_sampler = None
         if self._completion_sampler:
             return self._completion_sampler
-        vllm = await self.get_or_start_vllm()
-        self._completion_sampler = CompletionSampler(
-            vllm.client,
-            max_concurrent_samples=self.vllm_max_concurrent_requests,
-            min_time_between_requests=self.vllm_min_time_between_requests,
-            model=self.model,
+        vllms = await self.get_or_start_vllms()
+        self._completion_sampler = CompletionSamplerPool(
+            [
+                CompletionSampler(
+                    vllm.client,
+                    max_concurrent_samples=self.vllm_max_concurrent_requests,
+                    min_time_between_requests=self.vllm_min_time_between_requests,
+                    model=self.model,
+                )
+                for vllm in vllms
+            ]
         )
         return self._completion_sampler
 
-    async def get_or_start_vllm(self) -> vLLM:
+    async def get_or_start_vllms(self) -> list[vLLM]:
         if not self._vllm_task:
             self._vllm_task = asyncio.create_task(
-                start_vllm(
-                    self.model,
+                start_vllms(
+                    model=self.model,
+                    n=self.vllm_num,
                     max_concurrent_requests=self.vllm_max_concurrent_requests,
                     **self.vllm_kwargs,
                 )
@@ -556,11 +563,12 @@ class Trainer:
             self._vllm_task = None
             raise exception
 
-    async def stop_vllm(self) -> None:
+    async def stop_vllms(self) -> None:
         if self._vllm_task:
             try:
-                vllm = await self._vllm_task
-                vllm.process.terminate()
+                vllms = await self._vllm_task
+                for vllm in vllms:
+                    vllm.process.terminate()
             except BaseException as exception:
                 print(type(exception), exception)
             finally:

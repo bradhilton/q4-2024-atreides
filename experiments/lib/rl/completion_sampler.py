@@ -1,5 +1,6 @@
 import asyncio
 import bisect
+from collections import Counter
 from openai import AsyncOpenAI
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.completion_create_params import CompletionCreateParamsBase
@@ -9,6 +10,7 @@ from typing import (
     cast,
     Never,
     Optional,
+    Protocol,
     Unpack,
 )
 
@@ -95,6 +97,19 @@ class ThrottledPrioritySemaphoreContextManager:
         traceback: Optional[TracebackType],
     ) -> None:
         self.semaphore.release(self.n)
+
+
+class CompletionSamplerProtocol(Protocol):
+    async def sample_completions(
+        self,
+        parent: Completion,
+        continue_last_message_if_assistant: bool = True,
+        strip: set[str] = set(),
+        priority: float = 0.0,
+        **kwargs: Unpack[Kwargs],
+    ) -> list[Completion]: ...
+
+    async def get_model(self) -> str: ...
 
 
 class CompletionSampler:
@@ -234,3 +249,46 @@ class CompletionSampler:
         if choice.message.refusal:
             choice.message.refusal = choice.message.refusal.removeprefix(prefix)
         return choice
+
+    def __eq__(self, other: Any) -> bool:
+        return self is other
+
+    def __hash__(self) -> int:
+        return id(self)
+
+
+class CompletionSamplerPool(CompletionSampler):
+    def __init__(
+        self,
+        samplers: list[CompletionSampler],
+    ) -> None:
+        self.samplers = samplers
+        self.router: dict[Completion, CompletionSampler] = {}
+
+    async def sample_completions(
+        self,
+        parent: Completion,
+        continue_last_message_if_assistant: bool = True,
+        strip: set[str] = set(),
+        priority: float = 0.0,
+        **kwargs: Unpack[Kwargs],
+    ) -> list[Completion]:
+        root = parent.root()
+        if root in self.router:
+            completion_sampler = self.router[root]
+        else:
+            counter = Counter(self.router.values())
+            completion_sampler = self.router[root] = min(
+                self.samplers,
+                key=lambda sampler: counter[sampler],
+            )
+        return await completion_sampler.sample_completions(
+            parent,
+            continue_last_message_if_assistant=continue_last_message_if_assistant,
+            strip=strip,
+            priority=priority,
+            **kwargs,
+        )
+
+    async def get_model(self) -> str:
+        return await self.samplers[0].get_model()

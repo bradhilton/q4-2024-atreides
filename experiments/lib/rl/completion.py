@@ -293,6 +293,9 @@ class Completion:
             yield from self.parent.all_logprobs()
         yield from self.logprobs()
 
+    def root(self) -> "Completion":
+        return self.parent.root() if self.parent else self
+
     def token_advantage(self, cache: bool = False) -> float:
         return self.advantage(cache=cache) / (self.num_token_logprobs() or 1)
 
