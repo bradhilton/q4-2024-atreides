@@ -38,6 +38,7 @@ class PackedDataset(Dataset[PackedTensors]):
 
 
 def packed_tensors_from_dir(**kwargs: Unpack[DiskPackedTensors]) -> PackedTensors:
+    os.makedirs(kwargs["dir"], exist_ok=True)
     return {
         key: torch.from_file(
             f"{kwargs["dir"]}/{key}.pt",
@@ -128,9 +129,7 @@ def packed_tensors(
         }
         tensors["advantages"] = (
             tensors["advantages"] - torch.nanmean(tensors["advantages"])
-        ) / (
-            torch.std(tensors["advantages"][~torch.isnan(tensors["advantages"])]) + 1e-5
-        )
+        ) / (torch.std(tensors["advantages"][~torch.isnan(tensors["advantages"])]) or 1)
     with Timer("Created mask"):
         mask = get_mask(tensors["ids"], tensors["ancestor_ids"])
     return {

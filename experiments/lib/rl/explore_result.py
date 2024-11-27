@@ -167,17 +167,20 @@ class ExploreResult:
             for sequence in self.sequences[start:stop]
             for completion in sequence
         }
-        max_ancestors = max(
-            root.max_depth(self.model)
-            for root in {completion.root() for completion in completions}
+        max_ancestors = (
+            max(
+                root.max_depth(self.model)
+                for root in {completion.root() for completion in completions}
+            )
+            + 1
         )
-        ancestor_ids: dict[Completion, torch.Tensor] = {}
+        ancestor_ids: dict[Completion, list[int]] = {}
         for completion in completions:
             ids = [
                 id(ancestor) for ancestor in completion.ancestors(including_self=True)
             ]
             ids += [ids[-1]] * (max_ancestors - len(ids))
-            ancestor_ids[completion] = torch.tensor(ids)
+            ancestor_ids[completion] = ids
         packed_tensors["mask"][start:stop] = get_mask(
             ids=self._sequences_to_tensor(
                 sequences=self.sequences[start:stop],
@@ -187,7 +190,14 @@ class ExploreResult:
             ancestor_ids=self._sequences_to_tensor(
                 sequences=self.sequences[start:stop],
                 pad_value=0,
-                map=lambda completion: ancestor_ids[completion],
+                map=lambda completion: torch.tensor(
+                    [
+                        ancestor_ids[completion]
+                        for _ in range(
+                            self.completion_tensors[completion]["ids"].shape[0]
+                        )
+                    ]
+                ),
             ),
         )
 
