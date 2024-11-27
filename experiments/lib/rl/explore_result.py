@@ -3,6 +3,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 import numpy as np
 import random
+import shutil
 import time
 import torch
 from tqdm import tqdm
@@ -34,6 +35,9 @@ class ExploreResult:
     sequences: list[Counter[Completion]] = field(default_factory=list)
     start: float = field(default_factory=lambda: time.time())
 
+    def __post_init__(self) -> None:
+        shutil.rmtree(self.tensor_dir, ignore_errors=True)
+
     def add_exception(self, exception: BaseException) -> None:
         self.exceptions.append(exception)
         self._update_pbar_postfix()
@@ -51,6 +55,9 @@ class ExploreResult:
         if packed_tensors is not None:
             self._write_weights(packed_tensors)
             self._normalize_advantages(packed_tensors)
+            # Not sure why this is necessary
+            if not packed_tensors["mask"][0][0].any().item():
+                packed_tensors["mask"][0][0][0] = True
         return self
 
     def tensors(self) -> PackedTensors:

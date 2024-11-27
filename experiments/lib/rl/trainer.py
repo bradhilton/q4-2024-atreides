@@ -397,7 +397,6 @@ class Trainer:
 
     async def tune(self, result: ExploreResult) -> None:
         await self.stop_vllms()
-        tensors = result.tensors()
         if os.path.exists(os.path.abspath(self.model)):
             checkpoint_dir = os.path.abspath(self.model)
             checkpoint_files = None
@@ -493,11 +492,9 @@ class Trainer:
             default=None,
         )
 
-        if epoch is None:
-            print(
-                f"No model checkpoint files found to save in output directory {self.output_dir}"
-            )
-            return
+        assert (
+            epoch is not None
+        ), f"No model checkpoint files found to save in output directory {self.output_dir}"
 
         # Find the next iteration number by looking at existing subdirectories
         iteration = (
