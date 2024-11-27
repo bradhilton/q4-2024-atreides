@@ -155,7 +155,7 @@ class Trainer:
                 self.eval("val", 0, return_exceptions=True),
                 self.explore(1, return_exceptions=True),
             )
-            await self.tune(result.episodes)
+            await self.tune(result)
         _, _ = await asyncio.gather(
             self.eval("val", 0, return_exceptions=True),
             self.eval("test", 1) if test else asyncio.sleep(0),
@@ -395,20 +395,9 @@ class Trainer:
             tokenizer=self.tokenizer,
         )
 
-    async def tune(self, episodes: list[Episode]) -> None:
+    async def tune(self, result: ExploreResult) -> None:
         await self.stop_vllms()
-        tensors = packed_tensors(
-            episodes,
-            model=self.model,
-            sample_probability_power=self.completion_sample_probability_power,
-            sequence_length=self.tune_sequence_length,
-            trajectories_per_episode=(
-                int(self.samples_per_episode * self.tune_episode_sample_fraction)
-                if self.tune_episode_sample_fraction < 1.0
-                else None
-            ),
-            tokenizer=self.tokenizer,
-        )
+        tensors = result.tensors()
         if os.path.exists(os.path.abspath(self.model)):
             checkpoint_dir = os.path.abspath(self.model)
             checkpoint_files = None
@@ -440,8 +429,7 @@ class Trainer:
             )
         self.tune_recipe_config.model = ComponentConfig(self.tune_model)
         self.tune_recipe_config.dataset = ComponentConfig(
-            PackedDataset,
-            **packed_tensors_to_dir(tensors, self.output_dir + "/tensors"),
+            PackedDataset, **result.disk_packed_tensors()
         )
         if self.tune_run:
             dict_config = self.tune_recipe_config.dict_config()
@@ -453,7 +441,7 @@ class Trainer:
                     f"--{key.replace('_', '-')}{f'={value}' if value is not True else ''}"
                     for key, value in self.torchrun_kwargs.items()
                 ],
-                "lib.recipes.rl.RLRecipe",
+                "lib.rl.recipe.TuneRecipe",
                 "--config",
                 self.output_dir + "/config.yaml",
             ]

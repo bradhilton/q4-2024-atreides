@@ -10,7 +10,7 @@ from typing import Callable, Optional
 
 from .completion import Completion
 from .episode import Episode
-from .pack import get_mask, PackedTensors, packed_tensors_from_dir
+from .pack import DiskPackedTensors, get_mask, PackedTensors, packed_tensors_from_dir
 from ..tokenizer import Tokenizer
 from ..utils import truncate_pad
 
@@ -54,7 +54,10 @@ class ExploreResult:
         return self
 
     def tensors(self) -> PackedTensors:
-        return packed_tensors_from_dir(
+        return packed_tensors_from_dir(**self.disk_packed_tensors())
+
+    def disk_packed_tensors(self) -> DiskPackedTensors:
+        return DiskPackedTensors(
             dir=self.tensor_dir,
             num_sequences=len(self.sequences),
             sequence_length=self.sequence_length,
