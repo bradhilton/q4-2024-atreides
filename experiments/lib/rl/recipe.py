@@ -1056,6 +1056,10 @@ class TuneRecipe(FTRecipeInterface):
                     kl_div_to_log = (
                         running_result.kl_divergence.item() / running_result.num_tokens
                     )
+                    weighted_ce_to_log = (
+                        running_result.weighted_ce_loss.item()
+                        / running_result.num_tokens
+                    )
                     pbar.update(1)
                     pbar.set_description(
                         f"{curr_epoch + 1}|{self.global_step}|Loss: {loss_to_log:.4f}"
@@ -1064,6 +1068,7 @@ class TuneRecipe(FTRecipeInterface):
                         policy=f"{policy_to_log:.4f}",
                         entropy=f"{entropy_to_log:.4f}",
                         kl_div=f"{kl_div_to_log:.4f}",
+                        weighted_ce=f"{weighted_ce_to_log:.4f}",
                     )
 
                     # Log per-step metrics
@@ -1078,6 +1083,7 @@ class TuneRecipe(FTRecipeInterface):
                             "policy": policy_to_log,
                             "entropy": entropy_to_log,
                             "kl_div": kl_div_to_log,
+                            "weighted_ce": weighted_ce_to_log,
                             "tokens_per_second_per_gpu": running_result.num_tokens
                             / (time_per_step * world_size),
                         }

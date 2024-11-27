@@ -27,7 +27,7 @@ from typing import (
 )
 
 from .completion import SplitMethod
-from .completion_sampler import CompletionSampler, CompletionSamplerPool
+from .completion_sampler import SamplingKwargs, CompletionSampler, CompletionSamplerPool
 from .episode import Episode
 from .explore_result import ExploreResult
 from .pack import packed_tensors, PackedDataset, PackedTensors, packed_tensors_to_dir
@@ -52,11 +52,14 @@ class Trainer:
         samples_per_episode: Optional[int] = None,
         branch_factor: int = 2,
         sample_probability_power: float = 1.0,
+        sampling_kwargs: Optional[SamplingKwargs] = None,
         split_method: SplitMethod = "count",
         split_separators: Optional[set[str]] = None,
         train_episodes: Episodes,
         episodes_per_iteration: Optional[int] = None,
         patience_per_sample: float = 1.0,
+        patience_per_val_sample: float = 5.0,
+        patience_per_test_sample: float = 5.0,
         max_mask_sequence_batch_size: Optional[int] = None,
         val_episodes: Optional[Episodes] = None,
         val_samples_per_episode: int = 1,
@@ -100,7 +103,8 @@ class Trainer:
         self.base_model_checkpoint_files = base_model_checkpoint_files
         self.samples_per_episode = samples_per_episode or branch_factor
         self.branch_factor = branch_factor
-        self.completion_sample_probability_power = sample_probability_power
+        self.sample_probability_power = sample_probability_power
+        self.sampling_kwargs = sampling_kwargs or {}
         self.split_by: SplitMethod = split_method
         self.split_separators = split_separators
         self._train_iterator = ait.cycle(train_episodes)
@@ -109,6 +113,8 @@ class Trainer:
             episodes_per_iteration or getattr(train_episodes, "__len__", lambda: None)()
         )
         self.patience_per_sample = patience_per_sample
+        self.patience_per_val_sample = patience_per_val_sample
+        self.patience_per_test_sample = patience_per_test_sample
         self.max_mask_sequence_batch_size = max_mask_sequence_batch_size or max(
             32768 // tune_sequence_length, 1
         )
@@ -240,6 +246,7 @@ class Trainer:
                 episode.sample_completions_v2(
                     completion_sampler,
                     branch_factor=self.eval_samples_per_episode[split],
+                    sampling_kwargs=self.sampling_kwargs,
                 )
             )
             task.add_done_callback(done_callback)
@@ -248,10 +255,33 @@ class Trainer:
         pbar.total = len(episodes)
         pbar.refresh()
         self.eval_episodes[split] = episodes
-        await asyncio.gather(*tasks, return_exceptions=return_exceptions)
+        patience_per_sample = (
+            self.patience_per_val_sample
+            if split == "val"
+            else self.patience_per_test_sample
+        )
+        for future in asyncio.as_completed(tasks):
+            remaining_samples = self.eval_samples_per_episode[split] * (
+                pbar.total - pbar.n
+            )
+            patience = patience_per_sample * remaining_samples
+            try:
+                await asyncio.wait_for(future, timeout=patience)
+            except asyncio.TimeoutError:
+                print(
+                    f"Early stopping {split} evaluation due to expired patience ({remaining_samples} remaining samples x {patience_per_sample} patience per sample = {patience} seconds)"
+                )
+                for task in tasks:
+                    task.cancel()
+                break
+            except BaseException as exception:
+                if return_exceptions:
+                    exceptions.append(exception)
+                else:
+                    raise exception
         pbar.close()
         score = get_score()
-        self.eval_scores[split][self.model] = get_score()
+        self.eval_scores[split][self.model] = score
         if return_exceptions:
             return score, exceptions
         return score
@@ -273,7 +303,7 @@ class Trainer:
             pbar=pbar,
             max_mask_sequence_batch_size=self.max_mask_sequence_batch_size,
             model=self.model,
-            sample_probability_power=self.completion_sample_probability_power,
+            sample_probability_power=self.sample_probability_power,
             sequence_length=self.tune_sequence_length,
             tensor_dir=self.output_dir + "/tensors",
             tokenizer=self.tokenizer,
@@ -340,7 +370,7 @@ class Trainer:
         ):
             _frac = remaining_samples / self.samples_per_episode
             if frac:
-                pbar.update(frac - _frac)
+                pbar.update(round(frac - _frac, 4))
             frac = _frac
             if not await episode.sample_completions_v2(
                 completion_sampler=completion_sampler,
@@ -349,7 +379,8 @@ class Trainer:
                     math.ceil(remaining_samples / (self.branch_factor - 1))
                 ),
                 priority=priority,
-                sample_probability_power=self.completion_sample_probability_power,
+                sample_probability_power=self.sample_probability_power,
+                sampling_kwargs=self.sampling_kwargs,
                 split_by=self.split_by,
                 split_separators=self.split_separators,
             ):
@@ -385,7 +416,7 @@ class Trainer:
         return packed_tensors(
             episodes,
             model=self.model,
-            sample_probability_power=self.completion_sample_probability_power,
+            sample_probability_power=self.sample_probability_power,
             sequence_length=self.tune_sequence_length,
             trajectories_per_episode=(
                 int(self.samples_per_episode * self.tune_episode_sample_fraction)
@@ -457,12 +488,14 @@ class Trainer:
 
             async def log_output(stream: asyncio.StreamReader, io: IO[str]) -> None:
                 while True:
-                    line = await stream.readline()
-                    if not line:
+                    try:
+                        chunk = await stream.read(1024)
+                        if not chunk:
+                            break
+                        io.write(chunk.decode())
+                        io.flush()
+                    except Exception:
                         break
-                    decoded_line = line.decode()
-                    io.write(decoded_line)
-                    io.flush()
 
             tasks = []
             if process.stdout:

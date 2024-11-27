@@ -17,7 +17,7 @@ from typing import (
 from .completion import Completion
 
 
-class Kwargs(CompletionCreateParamsBase, total=False):
+class SamplingKwargs(CompletionCreateParamsBase, total=False):
     messages: Never
     model: Optional[str]
     extra_body: dict[str, Any]
@@ -106,7 +106,7 @@ class CompletionSamplerProtocol(Protocol):
         continue_last_message_if_assistant: bool = True,
         strip: set[str] = set(),
         priority: float = 0.0,
-        **kwargs: Unpack[Kwargs],
+        **kwargs: Unpack[SamplingKwargs],
     ) -> list[Completion]: ...
 
     async def get_model(self) -> str: ...
@@ -118,7 +118,7 @@ class CompletionSampler:
         client: AsyncOpenAI,
         max_concurrent_samples: int = 2**31 - 1,
         min_time_between_requests: float = 0.0,
-        **kwargs: Unpack[Kwargs],
+        **kwargs: Unpack[SamplingKwargs],
     ) -> None:
         self.client = client
         self.semaphore = ThrottledPrioritySemaphore(
@@ -135,7 +135,7 @@ class CompletionSampler:
         continue_last_message_if_assistant: bool = True,
         strip: set[str] = set(),
         priority: float = 0.0,
-        **kwargs: Unpack[Kwargs],
+        **kwargs: Unpack[SamplingKwargs],
     ) -> list[Completion]:
         messages = parent.all_message_params()
         untyped_kwargs: dict = {
@@ -271,7 +271,7 @@ class CompletionSamplerPool(CompletionSampler):
         continue_last_message_if_assistant: bool = True,
         strip: set[str] = set(),
         priority: float = 0.0,
-        **kwargs: Unpack[Kwargs],
+        **kwargs: Unpack[SamplingKwargs],
     ) -> list[Completion]:
         root = parent.root()
         if root in self.router:

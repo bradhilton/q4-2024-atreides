@@ -229,7 +229,7 @@ class ExploreResult:
         mask = replaced_tokens == replacement_token_id
         if tokens.shape != replaced_tokens.shape:
             tokens = replaced_tokens.clone()
-            tokens[mask] = torch.tensor(
+            _tokens = torch.tensor(
                 tokenizer.llm.get_tokenizer()(
                     [
                         token_logprob.token
@@ -240,6 +240,16 @@ class ExploreResult:
                     is_split_into_words=True,  # type: ignore
                 )["input_ids"]
             )
+            try:
+                tokens[mask] = _tokens
+            except RuntimeError as exception:
+                print(type(exception), exception)
+                tokens[mask] = truncate_pad(
+                    _tokens,
+                    [mask.sum().item()],  # type: ignore
+                    mode="constant",
+                    value=tokenizer.get_pad_token_id() or 0,
+                )
         advantages = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
         advantages[mask] = torch.tensor(
             [advantage for advantage in completion.token_advantages(cache=True)]

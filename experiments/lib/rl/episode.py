@@ -16,7 +16,7 @@ from typing import (
 )
 
 from .completion import Completion, SplitMethod
-from .completion_sampler import CompletionSampler
+from .completion_sampler import SamplingKwargs, CompletionSampler
 
 from ..tokenizer import Tokenizer
 
@@ -25,6 +25,7 @@ from ..tokenizer import Tokenizer
 class EpisodeCompletion:
     _completion: Completion
     _sampler: CompletionSampler
+    _sampling_kwargs: Optional[SamplingKwargs] = None
     _priority: Optional[int] = None
 
     @property
@@ -56,6 +57,7 @@ class EpisodeCompletion:
         completions = await self._sampler.sample_completions(
             Completion(parent=self._completion, messages=messages),
             priority=self._priority or 0,
+            **self._sampling_kwargs or {},
         )
         return EpisodeCompletion(_completion=completions[0], _sampler=self._sampler)
 
@@ -126,6 +128,7 @@ class Episode:
             branch_factor,
             fork_decay,
             split_separators or set(),
+            {},
         )
 
     def get_sampleable_parent(
@@ -193,6 +196,7 @@ class Episode:
         max_parallel_splits: int = 1,
         priority: Optional[int] = None,
         sample_probability_power: float = 1.0,
+        sampling_kwargs: Optional[SamplingKwargs] = None,
         split_by: SplitMethod = "count",
         split_separators: Optional[set[str]] = None,
     ) -> bool:
@@ -218,6 +222,7 @@ class Episode:
                         fork_decay=1.0,
                         split_separators=split_separators or set(),
                         priority=priority,
+                        sampling_kwargs=sampling_kwargs or {},
                     )
                     for parent in parents
                 )
@@ -262,6 +267,7 @@ class Episode:
         branch_factor: int,
         fork_decay: float,
         split_separators: set[str],
+        sampling_kwargs: SamplingKwargs,
         priority: Optional[int] = None,
     ) -> bool:
         num_children = sum(1 for child in parent.children if child.model == model)
@@ -272,7 +278,7 @@ class Episode:
             parent,
             strip=split_separators,
             priority=priority or 0,
-            n=n,
+            **{**sampling_kwargs, "n": n},
         )
         if num_children:
             for completion in completions:
@@ -280,7 +286,12 @@ class Episode:
                 completion.fork = True
         on_sample = self.on_sample(
             [
-                EpisodeCompletion(completion, completion_sampler, priority)
+                EpisodeCompletion(
+                    completion,
+                    completion_sampler,
+                    sampling_kwargs,
+                    priority,
+                )
                 for completion in completions
             ]
         )

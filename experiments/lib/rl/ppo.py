@@ -47,9 +47,11 @@ class PPOResult:
     policy_weight: torch.Tensor = tensor_field()
     entropy_weight: torch.Tensor = tensor_field()
     kl_weight: torch.Tensor = tensor_field()
+    weighted_ce_weight: torch.Tensor = tensor_field()
     policy_loss: torch.Tensor = tensor_field()
     entropy_bonus: torch.Tensor = tensor_field()
     kl_divergence: torch.Tensor = tensor_field()
+    weighted_ce_loss: torch.Tensor = tensor_field()
     num_tokens: torch.Tensor = field(default_factory=lambda: torch.tensor(0))
 
     def named_tensors(self) -> Iterable[tuple[str, torch.Tensor]]:
@@ -75,6 +77,7 @@ class PPOResult:
             (self.policy_weight / self.num_tokens) * self.policy_loss
             - (self.entropy_weight / self.num_tokens) * self.entropy_bonus
             + (self.kl_weight / self.num_tokens) * self.kl_divergence
+            + (self.weighted_ce_weight / self.num_tokens) * self.weighted_ce_loss
         )
 
 
@@ -85,6 +88,9 @@ class PPOLoss(nn.Module):
         clip_epsilon=0.2,
         entropy_coef=0.01,
         kl_coef=0.0,
+        weighted_ce_coef: float = 0.0,
+        weighted_entropy: bool = False,
+        weighted_kl: bool = False,
         normalize_advantages: bool = True,
     ):
         """
@@ -101,6 +107,9 @@ class PPOLoss(nn.Module):
         self.clip_epsilon = clip_epsilon
         self.entropy_coef = entropy_coef
         self.kl_coef = kl_coef
+        self.weighted_entropy = weighted_entropy
+        self.weighted_kl = weighted_kl
+        self.weighted_ce_coef = weighted_ce_coef
         self.normalize_advantages = normalize_advantages
 
     def forward(
@@ -267,24 +276,33 @@ class PPOLoss(nn.Module):
         # Take the minimum of the two surrogate losses
         policy_loss = -torch.min(surrogate1, surrogate2).mul(weights).sum()  # Scalar
 
+        if self.weighted_entropy:
+            entropy = entropy.mul(-advantages)
+
         # Entropy bonus
         entropy_bonus = entropy.mul(weights).sum()  # Scalar
 
         # Calculate KL divergence between the old and new policies
-        kl_divergence = (
-            torch.nn.functional.kl_div(
-                new_logprobs, logprobs, reduction="none", log_target=True
-            )
-            .mul(weights)
-            .sum()
+        kl_divergence = torch.nn.functional.kl_div(
+            new_logprobs, logprobs, reduction="none", log_target=True
         )
+
+        if self.weighted_kl:
+            kl_divergence = kl_divergence.mul(-advantages)
+
+        kl_divergence = kl_divergence.mul(weights).sum()
+
+        # Calculate cross entropy loss using log probabilities, weighted by advantages
+        weighted_ce_loss = -new_logprobs.mul(advantages).mul(weights).sum()
 
         return PPOResult(
             policy_weight=self.policy_coef * num_tokens,
             entropy_weight=self.entropy_coef * num_tokens,
             kl_weight=self.kl_coef * num_tokens,
+            weighted_ce_weight=self.weighted_ce_coef * num_tokens,
             policy_loss=policy_loss,
             entropy_bonus=entropy_bonus,
             kl_divergence=kl_divergence,
+            weighted_ce_loss=weighted_ce_loss,
             num_tokens=num_tokens,
         )
