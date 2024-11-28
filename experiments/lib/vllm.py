@@ -106,6 +106,7 @@ async def start_vllm(
     timeout: float = 120.0,
     env: Optional[dict[str, str]] = None,
     max_concurrent_requests: int = 128,
+    verbosity: int = 2,
     **kwargs: Any,
 ) -> vLLM:
     os.environ.pop("VLLM_LOGGING_CONFIG_PATH", None)
@@ -144,9 +145,10 @@ async def start_vllm(
             **(env or {}),
         },
     )
-    print(f"$ {' '.join(args)}")
+    if verbosity > 0:
+        print(f"$ {' '.join(args)}")
     log_file = open(LOG_FILENAME, "a")
-    logging = True
+    logging = verbosity > 1
 
     async def log_output(stream: asyncio.StreamReader, io: IO[str]) -> None:
         while True:
@@ -188,8 +190,9 @@ async def start_vllm(
                 process.terminate()
                 raise TimeoutError("vLLM server did not start in time")
             continue
-    logging = False
-    print(f"vLLM server started succesfully. Logs can be found at {LOG_FILENAME}")
+    if logging:
+        print(f"vLLM server started succesfully. Logs can be found at {LOG_FILENAME}")
+        logging = False
     return vLLM(client, process)
 
 
@@ -199,6 +202,7 @@ async def start_vllms(
     timeout: float = 120.0,
     env: Optional[dict[str, str]] = None,
     max_concurrent_requests: int = 128,
+    verbosity: int = 2,
     **kwargs: Any,
 ) -> list[vLLM]:
     ports: list[int] = []
@@ -224,7 +228,9 @@ async def start_vllms(
     visible_devices = [
         ",".join(str(device) for device in devices[i::n]) for i in range(n)
     ]
-    return await asyncio.gather(
+    if verbosity > 0:
+        print(f"Starting {n} vLLM servers...")
+    vllms = await asyncio.gather(
         *(
             start_vllm(
                 model,
@@ -232,11 +238,15 @@ async def start_vllms(
                 {**env, "CUDA_VISIBLE_DEVICES": cuda_visible_devices},
                 max_concurrent_requests,
                 port=port,
+                verbosity=1 if i == 0 and verbosity == 1 else verbosity,
                 **kwargs,
             )
-            for port, cuda_visible_devices in zip(ports, visible_devices)
+            for i, port, cuda_visible_devices in zip(range(n), ports, visible_devices)
         )
     )
+    if verbosity == 1:
+        print(f"vLLM servers started succesfully. Logs can be found at {LOG_FILENAME}")
+    return vllms
 
 
 def vllm_server_metrics(last_n_lines: int = 5) -> tuple[int, int]:

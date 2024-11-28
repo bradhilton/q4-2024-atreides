@@ -41,6 +41,8 @@ Episodes = Union[
     AsyncIterable[Union[Episode, BaseException]],
 ]
 
+Verbosity = Literal[0, 1, 2]
+
 
 class Trainer:
     def __init__(
@@ -155,16 +157,18 @@ class Trainer:
     def model(self) -> str:
         return self.models[-1]
 
-    async def train(self, iterations: int, test: bool = False) -> None:
+    async def train(
+        self, iterations: int, test: bool = False, verbosity: Verbosity = 2
+    ) -> None:
         for _ in range(iterations):
             _, result = await asyncio.gather(
-                self.eval("val", 0, return_exceptions=True),
-                self.explore(1, return_exceptions=True),
+                self.eval("val", 0, return_exceptions=True, verbosity=verbosity),
+                self.explore(1, return_exceptions=True, verbosity=verbosity),
             )
-            await self.tune(result)
+            await self.tune(result, verbosity=verbosity)
         _, _ = await asyncio.gather(
-            self.eval("val", 0, return_exceptions=True),
-            self.eval("test", 1) if test else asyncio.sleep(0),
+            self.eval("val", 0, return_exceptions=True, verbosity=verbosity),
+            self.eval("test", 1, verbosity=verbosity) if test else asyncio.sleep(0),
         )
 
     @overload
@@ -174,6 +178,7 @@ class Trainer:
         pbar_position: Optional[int] = None,
         *,
         return_exceptions: Literal[False] = False,
+        verbosity: Verbosity = 2,
     ) -> Optional[float]: ...
 
     @overload
@@ -183,6 +188,7 @@ class Trainer:
         pbar_position: Optional[int] = None,
         *,
         return_exceptions: Literal[True] = True,
+        verbosity: Verbosity = 2,
     ) -> tuple[Optional[float], list[BaseException]]: ...
 
     async def eval(
@@ -191,18 +197,20 @@ class Trainer:
         pbar_position: Optional[int] = None,
         *,
         return_exceptions: bool = True,
+        verbosity: Verbosity = 2,
     ) -> Union[Optional[float], tuple[Optional[float], list[BaseException]]]:
         if self.eval_episodes[split] is None:
             if return_exceptions:
                 return None, []
             return None
-        completion_sampler = await self.get_completion_sampler()
+        completion_sampler = await self.get_completion_sampler(verbosity=verbosity)
         pbar = self.tqdm(
             desc=split,
             total=getattr(self.eval_episodes[split], "__len__", lambda: None)(),
             unit="episode",
             dynamic_ncols=True,
             position=pbar_position,
+            disable=not verbosity,
         )
         tasks: list[asyncio.Task] = []
         episodes: list[Episode] = []
@@ -268,9 +276,10 @@ class Trainer:
             try:
                 await asyncio.wait_for(future, timeout=patience)
             except asyncio.TimeoutError:
-                print(
-                    f"Early stopping {split} evaluation due to expired patience ({remaining_samples} remaining samples x {patience_per_sample} patience per sample = {patience} seconds)"
-                )
+                if verbosity > 0:
+                    print(
+                        f"Early stopping {split} evaluation due to expired patience ({remaining_samples} remaining samples x {patience_per_sample} patience per sample = {patience} seconds)"
+                    )
                 for task in tasks:
                     task.cancel()
                 break
@@ -287,15 +296,20 @@ class Trainer:
         return score
 
     async def explore(
-        self, pbar_position: Optional[int] = None, *, return_exceptions: bool = True
+        self,
+        pbar_position: Optional[int] = None,
+        *,
+        return_exceptions: bool = True,
+        verbosity: Verbosity = 2,
     ) -> ExploreResult:
-        await self.get_completion_sampler()
+        await self.get_completion_sampler(verbosity=verbosity)
         pbar = self.tqdm(
             desc="explore",
             total=self.episodes_per_iteration,
             unit="episode",
             dynamic_ncols=True,
             position=pbar_position,
+            disable=not verbosity,
         )
         pbar.set_postfix(completed=0, exceptions=0)
         tasks: list[asyncio.Task[Episode]] = []
@@ -343,9 +357,10 @@ class Trainer:
             try:
                 await asyncio.wait_for(future, timeout=patience)
             except asyncio.TimeoutError:
-                print(
-                    f"Early stopping exploration due to expired patience ({remaining_samples} remaining samples x {self.patience_per_sample} patience per sample = {patience} seconds)"
-                )
+                if verbosity > 0:
+                    print(
+                        f"Early stopping exploration due to expired patience ({remaining_samples} remaining samples x {self.patience_per_sample} patience per sample = {patience} seconds)"
+                    )
                 for task in tasks:
                     task.cancel()
                 break
@@ -426,7 +441,7 @@ class Trainer:
             tokenizer=self.tokenizer,
         )
 
-    async def tune(self, result: ExploreResult) -> None:
+    async def tune(self, result: ExploreResult, *, verbosity: Verbosity = 2) -> None:
         await self.stop_vllms()
         if os.path.exists(os.path.abspath(self.model)):
             checkpoint_dir = os.path.abspath(self.model)
@@ -475,7 +490,8 @@ class Trainer:
                 "--config",
                 self.output_dir + "/config.yaml",
             ]
-            print(f"$ {' '.join(args)}")
+            if verbosity > 0:
+                print(f"$ {' '.join(args)}")
             process = await asyncio.create_subprocess_exec(
                 *args,
                 stdout=asyncio.subprocess.PIPE,
@@ -487,13 +503,26 @@ class Trainer:
             )
 
             async def log_output(stream: asyncio.StreamReader, io: IO[str]) -> None:
+                output = ""
                 while True:
                     try:
-                        chunk = await stream.read(1024)
+                        chunk = await stream.read(4096)
                         if not chunk:
                             break
-                        io.write(chunk.decode())
-                        io.flush()
+                        output += chunk.decode()
+                        if verbosity > 1:
+                            io.write(output)
+                            io.flush()
+                            output = ""
+                        elif verbosity == 1:
+                            output = output.split("\n")[-1]
+                            pbar_regex = re.compile(
+                                r"\[(?:\d+:)?\d+:\d+<(?:\d+:)?\d+:\d+.*\]"
+                            )
+                            if pbar_regex.search(output):
+                                io.write(output)
+                                io.flush()
+                                output = ""
                     except Exception:
                         break
 
@@ -571,12 +600,14 @@ class Trainer:
         print(f"Saved iteration {iteration} model files to {model_name}")
         self.models.append(model_name)
 
-    async def get_completion_sampler(self) -> CompletionSampler:
+    async def get_completion_sampler(
+        self, *, verbosity: Verbosity = 2
+    ) -> CompletionSampler:
         if not self._vllm_task:
             self._completion_sampler = None
         if self._completion_sampler:
             return self._completion_sampler
-        vllms = await self.get_or_start_vllms()
+        vllms = await self.get_or_start_vllms(verbosity=verbosity)
         self._completion_sampler = CompletionSamplerPool(
             [
                 CompletionSampler(
@@ -590,13 +621,14 @@ class Trainer:
         )
         return self._completion_sampler
 
-    async def get_or_start_vllms(self) -> list[vLLM]:
+    async def get_or_start_vllms(self, *, verbosity: Verbosity = 2) -> list[vLLM]:
         if not self._vllm_task:
             self._vllm_task = asyncio.create_task(
                 start_vllms(
                     model=self.model,
                     n=self.vllm_num,
                     max_concurrent_requests=self.vllm_max_concurrent_requests,
+                    verbosity=verbosity,
                     **self.vllm_kwargs,
                 )
             )
