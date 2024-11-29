@@ -103,8 +103,10 @@ class Clue:
         cp_solver_max_solve_time_per_turn: float = 0.5,
         check_cp_solver_grid: bool = True,
         check_if_deductive_solver_and_cp_solver_grids_match: bool = True,
+        return_first_solver_as_winner: bool = False,
         print_playthrough: bool = True,
     ) -> "Clue":
+        self.return_first_solver_as_winner = return_first_solver_as_winner
         self.solution = {
             element: random.choice(values) for element, values in self.elements.items()
         }
@@ -162,19 +164,7 @@ class Clue:
 
             grid = deductive_grid
 
-            accusation = [deck[i] for i in np.where(grid.sum(axis=1) == 0)[0]]
-
-            if len(accusation) == len(self.elements):
-                if print_playthrough:
-                    print(f"Player {player + 1} has an accusation: {accusation}")
-                    print(f"The actual solution is: {self.solution}")
-                assert all(
-                    accusation[i] == self.solution[element]
-                    for i, element in enumerate(self.elements)
-                )
-                if print_playthrough:
-                    print(f"Player {player + 1} won on turn {self.num_turns}!")
-                self.winner = player
+            if self._successful_accusation(deck, grid, print_playthrough, player):
                 break
 
             suggestion: list[str] = []
@@ -195,7 +185,7 @@ class Clue:
                     ),
                     # other unknown cards
                     (
-                        6,
+                        9,
                         np.logical_and(np.nansum(subgrid, axis=1) == 0, found_solution),
                     ),
                     # player cards
@@ -223,26 +213,67 @@ class Clue:
                 print(f"Player {player + 1} suggests: {suggestion}")
 
             responses: dict[int, Optional[str]] = {}
-            for j in chain(range(player + 1, self.num_players), range(player)):
-                responses[j] = None
+            for other_player in chain(
+                range(player + 1, self.num_players), range(player)
+            ):
+                responses[other_player] = None
                 suggestion_copy = suggestion.copy()
                 random.shuffle(suggestion_copy)
                 for card in suggestion_copy:
-                    if card in self.hands[j]:
-                        responses[j] = card
+                    if card in self.hands[other_player]:
+                        responses[other_player] = card
                         if print_playthrough:
                             print(
-                                f"Player {j + 1} reveals {card} to Player {player + 1}"
+                                f"Player {other_player + 1} reveals {card} to Player {player + 1}"
                             )
                         break
-                if responses[j] is not None:
+                if responses[other_player] is not None:
                     break
                 elif print_playthrough:
-                    print(f"Player {j + 1} has no card to reveal")
+                    print(f"Player {other_player + 1} has no card to reveal")
             self.history.append((suggestion, responses))
+            if return_first_solver_as_winner:
+                found_solution = False
+                for player in chain(range(player, self.num_players), range(player)):
+                    grid = deductive_solver.grid(self, player)
+                    if self._successful_accusation(
+                        deck, grid, print_playthrough, player
+                    ):
+                        found_solution = True
+                        break
+                if found_solution:
+                    break
+            elif all(card is None for card in responses.values()):
+                grid = deductive_solver.grid(self, player)
+                if self._successful_accusation(deck, grid, print_playthrough, player):
+                    break
             self.num_turns += 1
 
         return self
+
+    def _successful_accusation(
+        self,
+        deck: list[str],
+        grid: np.ndarray,
+        print_playthrough: bool,
+        player: int,
+    ) -> bool:
+        accusation = [deck[i] for i in np.where(grid.sum(axis=1) == 0)[0]]
+
+        if len(accusation) == len(self.elements):
+            if print_playthrough:
+                print(f"Player {player + 1} has an accusation: {accusation}")
+                print(f"The actual solution is: {self.solution}")
+            assert all(
+                accusation[i] == self.solution[element]
+                for i, element in enumerate(self.elements)
+            )
+            if print_playthrough:
+                print(f"Player {player + 1} won on turn {self.num_turns}!")
+            self.winner = player
+            return True
+
+        return False
 
     def print_grid(self, grid: np.ndarray) -> None:
         df = pd.DataFrame(
@@ -260,7 +291,7 @@ class Clue:
         df.columns.name = "Player"
         print(df)
 
-    def get_prompt(self) -> str:
+    def get_prompt_and_follow_up_and_solution(self) -> tuple[str, str, dict[str, str]]:
         def comma_and_join(items: Iterable[str]) -> str:
             items = list(items)
             return f"{', '.join(items[:-1])}{"," if len(items) > 2 else ""} and {items[-1]}"
@@ -277,7 +308,7 @@ class Clue:
             }
             return f"{players[player]} asked if anyone had {' or '.join(prefixed[card] for card in suggestion)}:\n{'\n'.join(f'- {players[responding_player]} showed {players[player]} {prefixed[card] if player == self.winner or responding_player == self.winner else 'a card'}' if card is not None else f'- {players[responding_player]} did not have any of the cards' for responding_player, card in responses.items())}"
 
-        return f"""
+        prompt = f"""
         On a {random.choice(("cool", "warm"))} {random.choice(("spring", "autumn"))} {random.choice(("morning", "afternoon", "evening", "day"))} {comma_and_join(players[:self.num_players])} sat down to play a {random.choice(("friendly", "competitive", "casual"))} {random.choice(("mystery", "deduction", "sleuthing"))} game.
 
         They {random.choice(("assembled", "gathered"))} {len(self.elements)} {random.choice(("decks", "groups", "stacks"))} of cards, each for a {random.choice(("different", "separate"))} {random.choice(("category", "type"))} of {random.choice(("information", "data"))} composed of the following:
@@ -303,12 +334,50 @@ class Clue:
 
         {"\n\n".join(turn(player % self.num_players, suggestion, responses) for player, (suggestion, responses) in enumerate(self.history))}
 
-        {random.choice(("At this point,", "Then, on their turn,"))} {players[self.winner]} was able to correctly {random.choice(("deduce", "infer"))} the {random.choice(("solution", "answer"))} and win the game.
+        At this point {players[self.winner]} was able to correctly {random.choice(("deduce", "infer"))} the {random.choice(("solution", "answer"))}{"" if self.return_first_solver_as_winner else " and win the game"}.
 
-        What were the facedown cards in the {random.choice(("center", "middle"))} of the table?
+        What were the facedown cards in the {random.choice(("center", "middle"))} of the table?{" And where were the other cards?" if self.return_first_solver_as_winner else ""}
         """.strip().replace(
             "    ", ""
         )
+
+        if self.return_first_solver_as_winner:
+            follow_up = (
+                "Fill out your answer like this:\n"
+                + "\n".join(
+                    f"{card}: <#LOCATION#>"
+                    for cards in self.elements.values()
+                    for card in cards
+                )
+                + f"\nWhere valid locations are {', '.join(players[:self.num_players])}, or Solution."
+            )
+        else:
+            follow_up = "Fill out your answer like this:\n" + "\n".join(
+                f"{element.capitalize()}: <#{element.upper()}#>"
+                for element in self.elements
+            )
+
+        if self.return_first_solver_as_winner:
+            solution = {
+                card: location
+                for card, location in chain(
+                    zip(self.solution.values(), ["Solution"] * len(self.solution)),
+                    (
+                        (card, players[i])
+                        for i, hand in enumerate(self.hands)
+                        for card in hand
+                    ),
+                )
+            }
+            solution = {
+                card: solution[card]
+                for cards in self.elements.values()
+                for card in cards
+            }
+        else:
+            solution = self.solution
+
+        return prompt, follow_up, solution
 
 
 Constraint = tuple[
