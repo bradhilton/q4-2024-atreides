@@ -4,3 +4,4 @@ $ tune run --nproc_per_node 8 full_finetune_distributed --config gemma/2B_full b
 $ tune run --nproc_per_node 8 full_finetune_distributed --config phi3/mini_full batch_size=64
 $ tune run --nproc_per_node 8 full_finetune_distributed --config gemma/7B_full batch_size=16
 $ tune run --nproc_per_node 8 full_finetune_distributed --config gemma2/2B_full batch_size=32
+$ tune run --nproc_per_node 8 full_finetune_distributed --config qwen2/7B_full batch_size=32
