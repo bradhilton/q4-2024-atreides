@@ -17,3 +17,4 @@ $ tune run --nproc_per_node 8 full_finetune_distributed --config qwen2_5/7B_full
 $ tune run --nproc_per_node 8 lora_finetune_distributed --config gemma/7B_lora batch_size=32
 $ tune run --nproc_per_node 8 lora_finetune_distributed --config gemma2/2B_lora batch_size=32
 $ tune run --nproc_per_node 8 lora_finetune_distributed --config qwen2/7B_lora batch_size=8
+$ tune run --nproc_per_node 8 full_finetune_distributed --config llama3_1/8B_full batch_size=8
