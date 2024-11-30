@@ -231,6 +231,89 @@ class Completion:
     def max_depth(self, model: Optional[str] = None) -> int:
         return max(self.depths(model=model), default=0)
 
+    def merge(self) -> "Completion":
+        """
+        Merges this completion with its parent and returns the merged (parent) completion.
+
+        Preconditions:
+        1) This completion must have a parent.
+        2) This completion must be the only child of its parent.
+        3) This completion must not have any uncommitted children.
+
+        Returns:
+            Completion: The merged completion.
+        """
+        assert self.parent, "Cannot merge a completion without a parent."
+        assert self.parent.children == {
+            self
+        }, "Cannot merge a completion with siblings."
+        assert (
+            self.parent.model == self.model
+        ), "Cannot merge completions from different models."
+        assert (
+            self.parent.fork == self.fork
+        ), "Cannot merge forked and unforked completions."
+        if (
+            self.parent.messages
+            and self.messages
+            and isinstance(self.parent.messages[-1], Choice)
+            and isinstance(self.messages[0], Choice)
+            and role(self.parent.messages[-1]) == role(self.messages[0]) == "assistant"
+        ):
+            parent_message = self.parent.messages[-1]
+            child_message = self.messages[0]
+            assert bool(parent_message.logprobs) == bool(
+                child_message.logprobs
+            ), "Cannot merge choices with differing presence of logprobs."
+            assert not (
+                parent_message.message.audio and child_message.message.audio
+            ), "Cannot merge audio messages."
+            assert not (
+                parent_message.message.function_call
+                and child_message.message.function_call
+            ), "Cannot merge function call messages."
+            parent_message.finish_reason = child_message.finish_reason
+            if parent_message.logprobs and child_message.logprobs:
+                if parent_message.logprobs.content or child_message.logprobs.content:
+                    parent_message.logprobs.content = (
+                        parent_message.logprobs.content or []
+                    ) + (child_message.logprobs.content or [])
+                if parent_message.logprobs.refusal or child_message.logprobs.refusal:
+                    parent_message.logprobs.refusal = (
+                        parent_message.logprobs.refusal or []
+                    ) + (child_message.logprobs.refusal or [])
+            if parent_message.message.content or child_message.message.content:
+                parent_message.message.content = (
+                    parent_message.message.content or ""
+                ) + (child_message.message.content or "")
+            if parent_message.message.refusal or child_message.message.refusal:
+                parent_message.message.refusal = (
+                    parent_message.message.refusal or ""
+                ) + (child_message.message.refusal or "")
+            parent_message.message.audio = (
+                parent_message.message.audio or child_message.message.audio
+            )
+            parent_message.message.function_call = (
+                parent_message.message.function_call
+                or child_message.message.function_call
+            )
+            if parent_message.message.tool_calls or child_message.message.tool_calls:
+                parent_message.message.tool_calls = (
+                    parent_message.message.tool_calls or []
+                ) + (child_message.message.tool_calls or [])
+            _ = self.messages.pop(0)
+        self.parent.messages.extend(self.messages)
+        self.parent.reward += self.reward
+        self.parent.children = self.children
+        for child in self.children:
+            child.parent = self.parent
+        self.parent.weight += self.weight
+        self.parent.weight /= 2
+        self.parent._cached_values = {}
+        self.parent._cached_sample_weights = {}
+        self.parent._cached_tokens = None
+        return self.parent
+
     def message_params(
         self, replacement_token: Optional[str] = None
     ) -> list[ChatCompletionMessageParam]:
@@ -309,26 +392,6 @@ class Completion:
         if self.parent:
             yield from self.parent.all_token_advantages(cache=cache)
         yield from self.token_advantages(cache=cache)
-
-    # def token_count(self, tokenizer: Tokenizer) -> int:
-    #     if not self.messages:
-    #         return 0
-    #     token_count = sum(
-    #         message_token_count(message, tokenizer) for message in self.messages
-    #     )
-    #     join_parent = (
-    #         self.parent
-    #         and self.parent.messages
-    #         and not (
-    #             role(self.parent.messages[-1]) == role(self.messages[0]) == "assistant"
-    #         )
-    #     )
-    #     token_count += tokenizer.join_token_count * max(
-    #         0, len(self.messages) - (0 if join_parent else 1)
-    #     )
-    #     if not self.parent:
-    #         token_count += tokenizer.prefix_token_count
-    #     return token_count
 
     def token_count(self, tokenizer: Tokenizer, *, cache: bool = False) -> int:
         return self.tokens(tokenizer, cache=cache).size(0)

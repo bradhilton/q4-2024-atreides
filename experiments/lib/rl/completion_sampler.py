@@ -221,7 +221,7 @@ class CompletionSampler:
         if kwargs.get("extra_body", {}).pop("guided_regex", None):
             kwargs["n"] = 1
             completions = [
-                completion
+                completion.merge()
                 for completions in await asyncio.gather(
                     *(
                         self.sample_completions(
