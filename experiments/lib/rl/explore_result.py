@@ -153,6 +153,7 @@ class ExploreResult:
             "values": torch.nan,
             "advantages": torch.nan,
             "logprobs": torch.nan,
+            "reference_logprobs": torch.nan,
             "input_pos": 0,
         }.items():
             packed_tensors[key][len(self.sequences)] = self._sequence_to_tensor(
@@ -266,9 +267,15 @@ class ExploreResult:
         )
         logprobs = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
         logprobs[mask] = torch.tensor([logprob for logprob in completion.logprobs()])
+        reference_logprobs = torch.full_like(
+            mask, fill_value=torch.nan, dtype=torch.float32
+        )
+        reference_logprobs[mask] = torch.tensor(
+            [ref_logprob for ref_logprob in completion.reference_logprobs()]
+        )
         prev_completion = next(reversed(self.completion_tensors), None)
         if prev_completion is not completion.parent:
-            values[0] = advantages[0] = logprobs[0] = torch.nan
+            values[0] = advantages[0] = logprobs[0] = reference_logprobs[0] = torch.nan
         start_pos_id = (
             completion.parent.all_token_count(tokenizer, cache=True)
             if completion.parent
@@ -279,6 +286,7 @@ class ExploreResult:
             "values": values,
             "advantages": advantages,
             "logprobs": logprobs,
+            "reference_logprobs": reference_logprobs,
             "ids": torch.tensor([id(completion) for _ in range(tokens.shape[0])]),
             "input_pos": torch.tensor(
                 [i for i in range(start_pos_id, tokens.shape[0] + start_pos_id)]

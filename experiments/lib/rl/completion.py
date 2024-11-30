@@ -70,6 +70,7 @@ class Completion:
         messages: Optional[Sequence[Union[ChatCompletionMessageParam, Choice]]] = None,
         reward: float = 0.0,
         children: Optional[set["Completion"]] = None,
+        reference: Optional["Completion"] = None,
         weight: float = 1.0,
         model: Optional[str] = None,
         fork: bool = False,
@@ -78,6 +79,7 @@ class Completion:
         self.messages = list(messages or [])
         self.reward = reward
         self.children = children or set()
+        self.reference = reference
         self.weight = weight
         self.model = model
         self.fork = fork
@@ -375,6 +377,12 @@ class Completion:
         if self.parent:
             yield from self.parent.all_logprobs()
         yield from self.logprobs()
+
+    def reference_logprobs(self) -> Iterable[float]:
+        if self.reference:
+            yield from self.reference.logprobs()
+        else:
+            yield from self.logprobs()
 
     def root(self) -> "Completion":
         return self.parent.root() if self.parent else self

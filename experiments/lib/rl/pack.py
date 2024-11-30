@@ -16,6 +16,7 @@ class PackedTensors(TypedDict):
     values: torch.Tensor
     advantages: torch.Tensor
     logprobs: torch.Tensor
+    reference_logprobs: torch.Tensor
     weights: torch.Tensor
     mask: torch.Tensor
     input_pos: torch.Tensor
@@ -56,6 +57,7 @@ def packed_tensors_from_dir(**kwargs: Unpack[DiskPackedTensors]) -> PackedTensor
             "values": torch.float32,
             "advantages": torch.float32,
             "logprobs": torch.float32,
+            "reference_logprobs": torch.float32,
             "weights": torch.float32,
             "mask": torch.bool,
             "input_pos": torch.long,
@@ -124,6 +126,7 @@ def packed_tensors(
                 "values": torch.nan,
                 "advantages": torch.nan,
                 "logprobs": torch.nan,
+                "reference_logprobs": torch.nan,
                 "weights": 0.0,
                 "ids": 0,
                 "ancestor_ids": 0,
@@ -143,6 +146,7 @@ def packed_tensors(
         "values": tensors["values"],
         "advantages": tensors["advantages"],
         "logprobs": tensors["logprobs"],
+        "reference_logprobs": tensors["reference_logprobs"],
         "weights": tensors["weights"],
         "mask": mask,
         "input_pos": tensors["input_pos"],
@@ -271,8 +275,14 @@ def get_completion_tensors(
     )
     logprobs = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
     logprobs[mask] = torch.tensor([logprob for logprob in completion.logprobs()])
+    reference_logprobs = torch.full_like(
+        mask, fill_value=torch.nan, dtype=torch.float32
+    )
+    reference_logprobs[mask] = torch.tensor(
+        [ref_logprob for ref_logprob in completion.reference_logprobs()]
+    )
     if not prev_completion is completion.parent:
-        values[0] = advantages[0] = logprobs[0] = torch.nan
+        values[0] = advantages[0] = logprobs[0] = reference_logprobs[0] = torch.nan
     ancestor_ids = [
         id(ancestor) for ancestor in completion.ancestors(including_self=True)
     ]
@@ -287,6 +297,7 @@ def get_completion_tensors(
         "values": values,
         "advantages": advantages,
         "logprobs": logprobs,
+        "reference_logprobs": reference_logprobs,
         "weights": torch.tensor([weight for _ in range(tokens.shape[0])]),
         "ids": torch.tensor([id(completion) for _ in range(tokens.shape[0])]),
         "ancestor_ids": torch.tensor([ancestor_ids for _ in range(tokens.shape[0])]),
