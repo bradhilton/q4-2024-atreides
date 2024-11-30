@@ -16,6 +16,7 @@ dependencies = [
     "llama-stack>=0.0.39",
     "matplotlib>=3.9.2",
     "minikanren>=1.0.3",
+    "nbconvert>=7.16.4",
     "neptune>=1.12.0",
     "ortools>=9.11.4210",
     "python-constraint>=1.4.0",
