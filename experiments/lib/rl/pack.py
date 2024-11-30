@@ -13,6 +13,7 @@ from ..utils import Timer, truncate_pad
 
 class PackedTensors(TypedDict):
     tokens: torch.Tensor
+    values: torch.Tensor
     advantages: torch.Tensor
     logprobs: torch.Tensor
     weights: torch.Tensor
@@ -52,6 +53,7 @@ def packed_tensors_from_dir(**kwargs: Unpack[DiskPackedTensors]) -> PackedTensor
         .squeeze()
         for key, dtype in {
             "tokens": torch.long,
+            "values": torch.float32,
             "advantages": torch.float32,
             "logprobs": torch.float32,
             "weights": torch.float32,
@@ -94,7 +96,7 @@ def packed_tensors(
     with Timer("Prepared tensors"):
         completion_tensors = {
             completion: get_completion_tensors(
-                completion, prev_completion, weight, tokenizer, max_ancestors
+                completion, prev_completion, weight, model, tokenizer, max_ancestors
             )
             for (completion, weight), prev_completion in zip(
                 completion_weights.items(), [None] + list(completion_weights.keys())
@@ -119,6 +121,7 @@ def packed_tensors(
             )
             for key, pad_value in {
                 "tokens": tokenizer.get_pad_token_id() or 0,
+                "values": torch.nan,
                 "advantages": torch.nan,
                 "logprobs": torch.nan,
                 "weights": 0.0,
@@ -127,6 +130,9 @@ def packed_tensors(
                 "input_pos": 0,
             }.items()
         }
+        tensors["values"] = (tensors["values"] - torch.nanmean(tensors["values"])) / (
+            torch.std(tensors["values"][~torch.isnan(tensors["values"])]) or 1
+        )
         tensors["advantages"] = (
             tensors["advantages"] - torch.nanmean(tensors["advantages"])
         ) / (torch.std(tensors["advantages"][~torch.isnan(tensors["advantages"])]) or 1)
@@ -134,6 +140,7 @@ def packed_tensors(
         mask = get_mask(tensors["ids"], tensors["ancestor_ids"])
     return {
         "tokens": tensors["tokens"],
+        "values": tensors["values"],
         "advantages": tensors["advantages"],
         "logprobs": tensors["logprobs"],
         "weights": tensors["weights"],
@@ -229,6 +236,7 @@ def get_completion_tensors(
     completion: Completion,
     prev_completion: Optional[Completion],
     weight: float,
+    model: str,
     tokenizer: Tokenizer,
     max_ancestors: int,
 ) -> dict[str, torch.Tensor]:
@@ -251,14 +259,20 @@ def get_completion_tensors(
                 is_split_into_words=True,  # type: ignore
             )["input_ids"]
         )
+    values = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
+    value = completion.value(cache=True, model=model)
+    values[mask] = torch.tensor([value for _ in range(mask.sum())])
     advantages = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
     advantages[mask] = torch.tensor(
-        [advantage for advantage in completion.token_advantages(cache=True)]
+        [
+            advantage
+            for advantage in completion.token_advantages(cache=True, model=model)
+        ]
     )
     logprobs = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
     logprobs[mask] = torch.tensor([logprob for logprob in completion.logprobs()])
     if not prev_completion is completion.parent:
-        advantages[0] = logprobs[0] = torch.nan
+        values[0] = advantages[0] = logprobs[0] = torch.nan
     ancestor_ids = [
         id(ancestor) for ancestor in completion.ancestors(including_self=True)
     ]
@@ -270,6 +284,7 @@ def get_completion_tensors(
     )
     return {
         "tokens": tokens,
+        "values": values,
         "advantages": advantages,
         "logprobs": logprobs,
         "weights": torch.tensor([weight for _ in range(tokens.shape[0])]),

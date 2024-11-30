@@ -379,19 +379,27 @@ class Completion:
     def root(self) -> "Completion":
         return self.parent.root() if self.parent else self
 
-    def token_advantage(self, cache: bool = False) -> float:
-        return self.advantage(cache=cache) / (self.num_token_logprobs() or 1)
+    def token_advantage(
+        self, cache: bool = False, model: Optional[str] = None
+    ) -> float:
+        return self.advantage(cache=cache, model=model) / (
+            self.num_token_logprobs() or 1
+        )
 
-    def token_advantages(self, cache: bool = False) -> Iterable[float]:
-        advantage = self.advantage(cache=cache)
+    def token_advantages(
+        self, cache: bool = False, model: Optional[str] = None
+    ) -> Iterable[float]:
+        advantage = self.advantage(cache=cache, model=model)
         num_token_logprobs = self.num_token_logprobs()
         token_advantage = advantage / max(num_token_logprobs, 1)
         return (token_advantage for _ in range(num_token_logprobs))
 
-    def all_token_advantages(self, cache: bool = False) -> Iterable[float]:
+    def all_token_advantages(
+        self, cache: bool = False, model: Optional[str] = None
+    ) -> Iterable[float]:
         if self.parent:
-            yield from self.parent.all_token_advantages(cache=cache)
-        yield from self.token_advantages(cache=cache)
+            yield from self.parent.all_token_advantages(cache=cache, model=model)
+        yield from self.token_advantages(cache=cache, model=model)
 
     def token_count(self, tokenizer: Tokenizer, *, cache: bool = False) -> int:
         return self.tokens(tokenizer, cache=cache).size(0)
@@ -593,10 +601,12 @@ class Completion:
     def __hash__(self) -> int:
         return id(self)
 
-    def html(self, scale_colors: float, cache: bool = False) -> str:
+    def html(
+        self, scale_colors: float, cache: bool = False, model: Optional[str] = None
+    ) -> str:
         if not self.messages:
             return ""
-        token_advantage = self.token_advantage(cache=cache) * scale_colors
+        token_advantage = self.token_advantage(cache=cache, model=model) * scale_colors
         color = f"rgba({255 if token_advantage < 0 else 0},0,{255 if token_advantage > 0 else 0}, {abs(token_advantage)})"
         html = (
             self.parent.html(scale_colors=scale_colors, cache=cache)

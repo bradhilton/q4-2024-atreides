@@ -54,7 +54,8 @@ class ExploreResult:
         packed_tensors = self._write_sequence(force_write_mask=True)
         if packed_tensors is not None:
             self._write_weights(packed_tensors)
-            self._normalize_advantages(packed_tensors)
+            self._normalize(packed_tensors, "values")
+            self._normalize(packed_tensors, "advantages")
             # Not sure why this is necessary
             if not packed_tensors["mask"][0][0].any().item():
                 packed_tensors["mask"][0][0][0] = True
@@ -149,6 +150,7 @@ class ExploreResult:
         )
         for key, pad_value in {
             "tokens": self.tokenizer.get_pad_token_id() or 0,
+            "values": torch.nan,
             "advantages": torch.nan,
             "logprobs": torch.nan,
             "input_pos": 0,
@@ -250,15 +252,23 @@ class ExploreResult:
                     mode="constant",
                     value=tokenizer.get_pad_token_id() or 0,
                 )
+        values = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
+        value = completion.value(cache=True, model=self.model)
+        values[mask] = torch.tensor([value for _ in range(mask.sum())])
         advantages = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
         advantages[mask] = torch.tensor(
-            [advantage for advantage in completion.token_advantages(cache=True)]
+            [
+                advantage
+                for advantage in completion.token_advantages(
+                    cache=True, model=self.model
+                )
+            ]
         )
         logprobs = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
         logprobs[mask] = torch.tensor([logprob for logprob in completion.logprobs()])
         prev_completion = next(reversed(self.completion_tensors), None)
         if prev_completion is not completion.parent:
-            advantages[0] = logprobs[0] = torch.nan
+            values[0] = advantages[0] = logprobs[0] = torch.nan
         start_pos_id = (
             completion.parent.all_token_count(tokenizer, cache=True)
             if completion.parent
@@ -266,6 +276,7 @@ class ExploreResult:
         )
         return {
             "tokens": tokens,
+            "values": values,
             "advantages": advantages,
             "logprobs": logprobs,
             "ids": torch.tensor([id(completion) for _ in range(tokens.shape[0])]),
@@ -312,10 +323,10 @@ class ExploreResult:
             ),
         )
 
-    def _normalize_advantages(self, packed_tensors: PackedTensors) -> None:
-        advantages = packed_tensors["advantages"][: len(self.sequences)]
-        advantages -= torch.nanmean(advantages)
-        advantages /= torch.std(advantages[~torch.isnan(advantages)]) or 1.0
+    def _normalize(self, packed_tensors: PackedTensors, key: str) -> None:
+        x = packed_tensors[key][: len(self.sequences)]
+        x -= torch.nanmean(x)
+        x /= torch.std(x[~torch.isnan(x)]) or 1.0
 
     def _sequences_to_tensor(
         self,

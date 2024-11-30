@@ -157,7 +157,7 @@ def write_trajectory_batch(
             list(
                 advantage
                 for trajectory in trajectories
-                for advantage in trajectory.terminus.all_token_advantages()
+                for advantage in trajectory.terminus.all_token_advantages(cache=True)
             )
         )
         tensors["logprobs"][row] = torch.full_like(
