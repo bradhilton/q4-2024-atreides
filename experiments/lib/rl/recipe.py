@@ -1003,9 +1003,11 @@ class TuneRecipe(FTRecipeInterface):
                 current_result = self._loss_fn.forward(
                     logits,
                     batch["tokens"],
+                    batch.get("values"),
                     batch["advantages"],
                     batch["logprobs"],
-                    batch.get("weights"),
+                    reference_logprobs=batch.get("reference_logprobs"),
+                    weights=batch.get("weights"),
                     bos_id=bos_id,
                 )
                 del logits, batch
@@ -1050,11 +1052,22 @@ class TuneRecipe(FTRecipeInterface):
                     policy_to_log = (
                         running_result.policy_loss.item() / running_result.num_tokens
                     )
+                    value_to_log = (
+                        running_result.value_loss.item() / running_result.num_tokens
+                    )
                     entropy_to_log = (
                         running_result.entropy_bonus.item() / running_result.num_tokens
                     )
                     kl_div_to_log = (
                         running_result.kl_divergence.item() / running_result.num_tokens
+                    )
+                    weighted_entropy_to_log = (
+                        running_result.weighted_entropy_bonus.item()
+                        / running_result.num_tokens
+                    )
+                    weighted_kl_div_to_log = (
+                        running_result.weighted_kl_divergence.item()
+                        / running_result.num_tokens
                     )
                     weighted_ce_to_log = (
                         running_result.weighted_ce_loss.item()
@@ -1066,8 +1079,11 @@ class TuneRecipe(FTRecipeInterface):
                     )
                     pbar.set_postfix(
                         policy=f"{policy_to_log:.4f}",
+                        value=f"{value_to_log:.4f}",
                         entropy=f"{entropy_to_log:.4f}",
                         kl_div=f"{kl_div_to_log:.4f}",
+                        weighted_entropy=f"{weighted_entropy_to_log:.4f}",
+                        weighted_kl_div=f"{weighted_kl_div_to_log:.4f}",
                         weighted_ce=f"{weighted_ce_to_log:.4f}",
                     )
 
@@ -1081,8 +1097,11 @@ class TuneRecipe(FTRecipeInterface):
                             "loss": loss_to_log,
                             "lr": get_lr(self._optimizer or self._optim_ckpt_wrapper),
                             "policy": policy_to_log,
+                            "value": value_to_log,
                             "entropy": entropy_to_log,
                             "kl_div": kl_div_to_log,
+                            "weighted_entropy": weighted_entropy_to_log,
+                            "weighted_kl_div": weighted_kl_div_to_log,
                             "weighted_ce": weighted_ce_to_log,
                             "tokens_per_second_per_gpu": running_result.num_tokens
                             / (time_per_step * world_size),
