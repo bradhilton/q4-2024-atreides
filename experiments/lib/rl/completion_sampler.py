@@ -7,6 +7,7 @@ from openai.types.chat.completion_create_params import CompletionCreateParamsBas
 from types import TracebackType
 from typing import (
     Any,
+    Callable,
     cast,
     Never,
     Optional,
@@ -135,8 +136,37 @@ class CompletionSampler:
         continue_last_message_if_assistant: bool = True,
         strip: set[str] = set(),
         priority: float = 0.0,
+        get_recovery_pattern: Optional[Callable[[], Optional[str]]] = None,
         **kwargs: Unpack[SamplingKwargs],
     ) -> list[Completion]:
+        if get_recovery_pattern and parent.advantage(cache=True) < 0:
+            patterns = Counter(
+                get_recovery_pattern() for _ in range(kwargs.get("n", 1) or 1)
+            )
+            if None not in patterns or len(patterns) > 1:
+                _ = kwargs.pop("n", None)
+                extra_body = kwargs.pop("extra_body", {})
+                return [
+                    completion
+                    for completions in await asyncio.gather(
+                        *(
+                            self.sample_completions(
+                                parent,
+                                continue_last_message_if_assistant,
+                                strip,
+                                priority,
+                                n=count,
+                                extra_body={
+                                    **extra_body,
+                                    "guided_regex": pattern,
+                                },
+                                **kwargs,  # type: ignore
+                            )
+                            for pattern, count in patterns.items()
+                        )
+                    )
+                    for completion in completions
+                ]
         messages = parent.all_message_params()
         untyped_kwargs: dict = {
             "messages": messages,
@@ -154,7 +184,7 @@ class CompletionSampler:
             "extra_body": {
                 **self.kwargs.get("extra_body", {}),
                 **kwargs.get("extra_body", {}),
-                "skip_special_tokens": False,
+                "skip_special_tokens": "guided_regex" in kwargs.get("extra_body", {}),
             },
         }
         if continue_last_message_if_assistant and messages[-1]["role"] == "assistant":
@@ -166,45 +196,16 @@ class CompletionSampler:
                 )
             untyped_kwargs["extra_body"]["add_generation_prompt"] = False
             untyped_kwargs["extra_body"]["continue_final_message"] = True
-            # import copy
-            # import random
-
-            # if prefix and random.random() < 0.25 and parent.advantage(cache=True) < 0:
-            #     untyped_kwargs["messages"] = copy.deepcopy(untyped_kwargs["messages"])
-            #     untyped_kwargs["messages"][-1]["content"] += random.choice(
-            #         ["...", "—"]
-            #     ) + random.choice(
-            #         [
-            #             "",
-            #             "",
-            #             "",
-            #             "hmm",
-            #             "wait a second",
-            #             "sorry",
-            #             "sorry, I made a mistake",
-            #             "no",
-            #             "no",
-            #             "but",
-            #             "however",
-            #             "alternatively",
-            #             "actually",
-            #             "technically",
-            #             "what I mean to say is",
-            #             "hold on",
-            #             "let's take a step back",
-            #         ]
-            #     )  # type: ignore
         else:
             prefix = ""
         if not "model" in untyped_kwargs:
             untyped_kwargs["model"] = await self.get_model()
-
         async with self.semaphore(untyped_kwargs.get("n", 1), priority or 0):
             chat_completion = cast(
                 ChatCompletion,
                 await self.client.chat.completions.create(**untyped_kwargs),
             )
-        return [
+        completions = [
             Completion(
                 parent=parent,
                 messages=[
@@ -217,6 +218,25 @@ class CompletionSampler:
             )
             for choice in chat_completion.choices
         ]
+        if kwargs.get("extra_body", {}).pop("guided_regex", None):
+            kwargs["n"] = 1
+            completions = [
+                completion
+                for completions in await asyncio.gather(
+                    *(
+                        self.sample_completions(
+                            completion,
+                            continue_last_message_if_assistant,
+                            strip,
+                            priority,
+                            **kwargs,
+                        )
+                        for completion in completions
+                    )
+                )
+                for completion in completions
+            ]
+        return completions
 
     _get_model_task: Optional[asyncio.Task[str]] = None
 

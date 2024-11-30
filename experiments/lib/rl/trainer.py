@@ -53,6 +53,7 @@ class Trainer:
         output_dir: str,
         samples_per_episode: Optional[int] = None,
         branch_factor: int = 2,
+        get_recovery_pattern: Optional[Callable[[], Optional[str]]] = None,
         sample_probability_power: float = 1.0,
         sampling_kwargs: Optional[SamplingKwargs] = None,
         split_method: SplitMethod = "count",
@@ -105,6 +106,7 @@ class Trainer:
         self.base_model_checkpoint_files = base_model_checkpoint_files
         self.samples_per_episode = samples_per_episode or branch_factor
         self.branch_factor = branch_factor
+        self.get_recovery_pattern = get_recovery_pattern or (lambda: None)
         self.sample_probability_power = sample_probability_power
         self.sampling_kwargs = sampling_kwargs or {}
         self.split_by: SplitMethod = split_method
@@ -390,6 +392,7 @@ class Trainer:
             if not await episode.sample_completions_v2(
                 completion_sampler=completion_sampler,
                 branch_factor=self.branch_factor,
+                get_recovery_pattern=self.get_recovery_pattern,
                 max_parallel_splits=int(
                     math.ceil(remaining_samples / (self.branch_factor - 1))
                 ),
