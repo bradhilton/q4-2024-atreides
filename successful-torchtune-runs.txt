@@ -47,3 +47,4 @@ $ tune run --nproc_per_node 8 lora_finetune_distributed --config llama2/70B_qlor
 $ tune run --nproc_per_node 8 lora_finetune_distributed --config llama3_2/1B_lora batch_size=16
 $ tune run --nproc_per_node 8 lora_finetune_distributed --config llama3_2/3B_lora batch_size=8
 $ tune run --nproc_per_node 8 lora_finetune_distributed --config llama3/70B_lora batch_size=8 compile=true # 1:02:23 train time
+$ tune run --nproc_per_node 8 lora_dpo_distributed --config llama2/7B_lora_dpo batch_size=12 # 9:00:47 train time
