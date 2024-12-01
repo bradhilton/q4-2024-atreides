@@ -5,10 +5,12 @@ import asyncio
 import glob
 import math
 from omegaconf import OmegaConf
+from openai import AsyncOpenAI
 import os
 import re
 import shutil
 import sys
+import torch
 from torchtune.modules import TransformerDecoder
 from torchtune.training import FullModelHFCheckpointer
 from torchtune.training.metric_logging import DiskLogger
@@ -26,7 +28,7 @@ from typing import (
     Union,
 )
 
-from .completion import SplitMethod
+from .completion import Completion, SplitMethod
 from .completion_sampler import SamplingKwargs, CompletionSampler, CompletionSamplerPool
 from .episode import Episode
 from .explore_result import ExploreResult
@@ -54,6 +56,8 @@ class Trainer:
         samples_per_episode: Optional[int] = None,
         branch_factor: int = 2,
         get_recovery_pattern: Optional[Callable[[], Optional[str]]] = None,
+        reference_client_and_model: Optional[tuple[AsyncOpenAI, str]] = None,
+        reference_roundtrips_per_episode: int = 1,
         sample_probability_power: float = 1.0,
         sampling_kwargs: Optional[SamplingKwargs] = None,
         split_method: SplitMethod = "count",
@@ -107,6 +111,8 @@ class Trainer:
         self.samples_per_episode = samples_per_episode or branch_factor
         self.branch_factor = branch_factor
         self.get_recovery_pattern = get_recovery_pattern or (lambda: None)
+        self.reference_client_and_model = reference_client_and_model
+        self.reference_roundtrips_per_episode = reference_roundtrips_per_episode
         self.sample_probability_power = sample_probability_power
         self.sampling_kwargs = sampling_kwargs or {}
         self.split_by: SplitMethod = split_method
@@ -405,20 +411,22 @@ class Trainer:
                 break
             await asyncio.sleep(1e-6)
             if frac == 1.0 and all(
-                c.advantage(cache=True) == 0
+                c.advantage(cache=True, model=self.model) == 0
                 for c in episode.completion.children
                 if c.model == self.model
             ):
                 if (
                     episode.get_easier_episode
                     and episode.min_value is not None
-                    and episode.completion.value() <= episode.min_value
+                    and episode.completion.value(cache=True, model=self.model)
+                    <= episode.min_value
                 ):
                     substitute = await maybe_await(episode.get_easier_episode())
                 elif (
                     episode.get_harder_episode
                     and episode.max_value is not None
-                    and episode.completion.value() >= episode.max_value
+                    and episode.completion.value(cache=True, model=self.model)
+                    >= episode.max_value
                 ):
                     substitute = await maybe_await(episode.get_harder_episode())
                 elif episode.get_similar_episode:
@@ -428,7 +436,45 @@ class Trainer:
                 self._substitute_episodes[episode] = substitute
                 return await self._explore_episode(substitute, pbar, priority)
         pbar.update(frac or 0)
+        if self.reference_client_and_model:
+            client, model = self.reference_client_and_model
+            if model == self.model:
+                return episode
+            leaves = list(episode.completion.leaves(model=self.model))
+            for offset in range(self.reference_roundtrips_per_episode):
+                await asyncio.gather(
+                    *(
+                        self._get_reference_logprobs(leaf, client, model)
+                        for leaf in leaves[
+                            offset :: self.reference_roundtrips_per_episode
+                        ]
+                    )
+                )
         return episode
+
+    async def _get_reference_logprobs(
+        self, completion: Completion, client: AsyncOpenAI, model: str
+    ) -> None:
+        tokens = completion.all_tokens(self.tokenizer, cache=True).tolist()
+        plain_completion = await client.completions.create(
+            model=model,
+            prompt=tokens,
+            max_tokens=1,
+            extra_body={
+                "prompt_logprobs": True,
+            },
+        )
+        prompt_logprobs: list[dict[str, dict[str, Any]]] = plain_completion.choices[0].prompt_logprobs  # type: ignore
+        reference_logprobs = [
+            (prompt_logprob[str(token)]["logprob"] if prompt_logprob else torch.nan)
+            for token, prompt_logprob in zip(tokens, prompt_logprobs)
+        ]
+        for completion in completion.ancestors(including_self=True, reverse=True):
+            count = completion.token_count(self.tokenizer, cache=True)
+            completion.reference_logprobs, reference_logprobs = (
+                torch.tensor(reference_logprobs[:count]),
+                reference_logprobs[count:],
+            )
 
     def tensors(self, episodes: list[Episode]) -> PackedTensors:
         return packed_tensors(

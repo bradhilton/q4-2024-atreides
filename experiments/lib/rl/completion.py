@@ -70,7 +70,6 @@ class Completion:
         messages: Optional[Sequence[Union[ChatCompletionMessageParam, Choice]]] = None,
         reward: float = 0.0,
         children: Optional[set["Completion"]] = None,
-        reference: Optional["Completion"] = None,
         weight: float = 1.0,
         model: Optional[str] = None,
         fork: bool = False,
@@ -79,10 +78,10 @@ class Completion:
         self.messages = list(messages or [])
         self.reward = reward
         self.children = children or set()
-        self.reference = reference
         self.weight = weight
         self.model = model
         self.fork = fork
+        self.reference_logprobs: Optional[torch.Tensor] = None
         self._cached_values: dict[tuple[Optional[str], Optional[bool]], float] = {}
         self._cached_sample_weights: dict[tuple[Optional[str], float], float] = {}
         self._cached_tokens: Optional[torch.Tensor] = None
@@ -378,12 +377,6 @@ class Completion:
             yield from self.parent.all_logprobs()
         yield from self.logprobs()
 
-    def reference_logprobs(self) -> Iterable[float]:
-        if self.reference:
-            yield from self.reference.logprobs()
-        else:
-            yield from self.logprobs()
-
     def root(self) -> "Completion":
         return self.parent.root() if self.parent else self
 
@@ -451,6 +444,26 @@ class Completion:
         if cache and replacement_token is None:
             self._cached_tokens = tokens
         return tokens
+
+    def all_tokens(
+        self,
+        tokenizer: Tokenizer,
+        *,
+        cache: bool = False,
+        replacement_token: Optional[str] = None,
+    ) -> torch.Tensor:
+        if self.parent:
+            return torch.cat(
+                (
+                    self.parent.all_tokens(
+                        tokenizer, cache=cache, replacement_token=replacement_token
+                    ),
+                    self.tokens(
+                        tokenizer, cache=cache, replacement_token=replacement_token
+                    ),
+                )
+            )
+        return self.tokens(tokenizer, cache=cache, replacement_token=replacement_token)
 
     def sample_weight(
         self, cache: bool = False, model: Optional[str] = None, power: float = 1.0

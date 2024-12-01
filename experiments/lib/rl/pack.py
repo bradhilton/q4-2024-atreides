@@ -275,12 +275,7 @@ def get_completion_tensors(
     )
     logprobs = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
     logprobs[mask] = torch.tensor([logprob for logprob in completion.logprobs()])
-    reference_logprobs = torch.full_like(
-        mask, fill_value=torch.nan, dtype=torch.float32
-    )
-    reference_logprobs[mask] = torch.tensor(
-        [ref_logprob for ref_logprob in completion.reference_logprobs()]
-    )
+    reference_logprobs = (completion.reference_logprobs or logprobs).clone()
     if not prev_completion is completion.parent:
         values[0] = advantages[0] = logprobs[0] = reference_logprobs[0] = torch.nan
     ancestor_ids = [
