@@ -40,6 +40,7 @@ from typing import (
 )
 
 from ..tokenizer import Tokenizer
+from ..utils import get_token
 
 
 class ChatCompletionUserMessageParamOverride(
@@ -437,13 +438,21 @@ class Completion:
                 if isinstance(self.messages[-1], Choice)
                 and self.messages[-1].logprobs
                 and self.messages[-1].logprobs.content
-                and self.messages[-1].logprobs.content[-1].token == "<|im_end|>"
+                and get_token(self.messages[-1].logprobs.content[-1]) == "<|im_end|>"
                 else None
             ),
         )
         if cache and replacement_token is None:
             self._cached_tokens = tokens
         return tokens
+
+    def tokens2(
+        self,
+        tokenizer: Tokenizer,
+        *,
+        cache: bool = False,
+        replacement_token: Optional[str] = None,
+    ) -> torch.Tensor: ...
 
     def all_tokens(
         self,
@@ -538,7 +547,7 @@ class Completion:
                     i += 1
                     continue
                 l = sum(
-                    len(token_logprob.token)
+                    len(get_token(token_logprob))
                     for token_logprob in choice.logprobs.content[:k]
                 )
                 for child in self.children:
@@ -587,7 +596,9 @@ class Completion:
                 if (
                     separator
                     and n
-                    and (separators is None or not token_logprob.token in separators)
+                    and (
+                        separators is None or not get_token(token_logprob) in separators
+                    )
                 ):
                     yield weight
                     yield from (0 for _ in range(n - 1))
@@ -599,7 +610,7 @@ class Completion:
                     logprob=lambda x: -x,
                 )[by](token_logprob.logprob)
                 n += 1
-                separator = separators is None or token_logprob.token in separators
+                separator = separators is None or get_token(token_logprob) in separators
         if n:
             yield weight
             yield from (0 for _ in range(n - 1))
@@ -668,12 +679,12 @@ def message_param(
         message = message.model_copy()
         if choice.logprobs.content:
             message.content = "".join(
-                replacement_token or token_logprob.token
+                replacement_token or get_token(token_logprob)
                 for token_logprob in choice.logprobs.content
             )
         if choice.logprobs.refusal:
             message.refusal = "".join(
-                replacement_token or token_logprob.token
+                replacement_token or get_token(token_logprob)
                 for token_logprob in choice.logprobs.refusal
             )
     message_param: ChatCompletionAssistantMessageParam = {

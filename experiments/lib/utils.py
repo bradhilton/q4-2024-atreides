@@ -1,6 +1,7 @@
 import black
 from collections import deque
 import time
+from openai.types.chat.chat_completion_token_logprob import ChatCompletionTokenLogprob
 import torch
 from typing import Any, Callable, Optional, ParamSpec, Sequence, TypeVar, Union
 
@@ -20,6 +21,12 @@ def black_print(
     print(
         black.format_str(str(value), mode=black.Mode()).strip(),
     )
+
+
+def get_token(token_logprob: ChatCompletionTokenLogprob) -> str:
+    if token_logprob.token.startswith("token_id:"):
+        return bytes(token_logprob.bytes or []).decode()
+    return token_logprob.token
 
 
 def read_last_n_lines(filename: str, n: int) -> str:

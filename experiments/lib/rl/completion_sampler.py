@@ -16,6 +16,7 @@ from typing import (
 )
 
 from .completion import Completion
+from ..utils import get_token
 
 
 class SamplingKwargs(CompletionCreateParamsBase, total=False):
@@ -260,8 +261,8 @@ class CompletionSampler:
         if strip and choice.logprobs:
             logprobs = choice.logprobs.content or choice.logprobs.refusal or []
             while logprobs:
-                if logprobs[0].token in strip:
-                    prefix += logprobs.pop(0).token
+                if get_token(logprobs[0]) in strip:
+                    prefix += get_token(logprobs.pop(0))
                 else:
                     break
         if choice.message.content:

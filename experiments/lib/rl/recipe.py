@@ -6,7 +6,7 @@
 
 from functools import partial
 import os
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
 import sys
 import time
 import torch
@@ -86,7 +86,11 @@ class ComponentConfig(DictConfig, Generic[T]):
 def instantiate_component(cfg: ComponentConfig[T], *args: Any, **kwargs: Any) -> T:
     if isinstance(cfg._component_, str):
         return config.instantiate(cfg, *args, **kwargs)
-    _kwargs = {str(k): v for k, v in cfg.items() if k != "_component_"}
+    _kwargs = {
+        str(k): list(v) if isinstance(v, ListConfig) else v
+        for k, v in cfg.items()
+        if k != "_component_"
+    }
     _kwargs.update(kwargs)
     return cfg._component_(*args, **_kwargs)
 
@@ -1001,11 +1005,11 @@ class TuneRecipe(FTRecipeInterface):
 
                 # Compute loss
                 current_result = self._loss_fn.forward(
-                    logits,
-                    batch["tokens"],
-                    batch.get("values"),
-                    batch["advantages"],
-                    batch["logprobs"],
+                    logits=logits,
+                    tokens=batch["tokens"],
+                    values=batch.get("values"),
+                    advantages=batch["advantages"],
+                    logprobs=batch["logprobs"],
                     reference_logprobs=batch.get("reference_logprobs"),
                     weights=batch.get("weights"),
                     bos_id=bos_id,

@@ -13,7 +13,7 @@ import shutil
 import sys
 import torch
 from torchtune.modules import TransformerDecoder
-from torchtune.training import FullModelHFCheckpointer
+from torchtune.training import cleanup_before_training, FullModelHFCheckpointer
 from torchtune.training.metric_logging import DiskLogger
 from tqdm import tqdm
 from tqdm.notebook import tqdm_notebook
@@ -597,6 +597,7 @@ class Trainer:
                 )
             _ = await asyncio.gather(*tasks)
         else:
+            cleanup_before_training()
             recipe_main(self.tune_recipe_config)
         self.save(checkpoint_dir)
 

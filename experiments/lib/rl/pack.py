@@ -8,7 +8,7 @@ from typing import Optional, TypedDict, Unpack
 from .completion import Completion
 from .episode import Episode
 from ..tokenizer import Tokenizer
-from ..utils import Timer, truncate_pad
+from ..utils import get_token, Timer, truncate_pad
 
 
 class PackedTensors(TypedDict):
@@ -255,7 +255,7 @@ def get_completion_tensors(
         tokens[mask] = torch.tensor(
             tokenizer.llm.get_tokenizer()(
                 [
-                    token_logprob.token
+                    get_token(token_logprob)
                     for token_logprobs in completion._token_logprob_sequences()
                     for token_logprob in token_logprobs
                 ],

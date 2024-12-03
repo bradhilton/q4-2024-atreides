@@ -13,7 +13,7 @@ from .completion import Completion
 from .episode import Episode
 from .pack import DiskPackedTensors, get_mask, PackedTensors, packed_tensors_from_dir
 from ..tokenizer import Tokenizer
-from ..utils import truncate_pad
+from ..utils import get_token, truncate_pad
 
 
 @dataclass
@@ -235,7 +235,7 @@ class ExploreResult:
             _tokens = torch.tensor(
                 tokenizer.llm.get_tokenizer()(
                     [
-                        token_logprob.token
+                        get_token(token_logprob)
                         for token_logprobs in completion._token_logprob_sequences()
                         for token_logprob in token_logprobs
                     ],

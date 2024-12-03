@@ -137,6 +137,7 @@ class PPOLoss(nn.Module):
 
     def forward(
         self,
+        *,
         logits: Union[torch.Tensor, list[torch.Tensor]],
         tokens: torch.Tensor,
         values: Optional[torch.Tensor],
@@ -203,13 +204,13 @@ class PPOLoss(nn.Module):
                 advantages.chunk(num_chunks, dim=1),
                 logprobs.chunk(num_chunks, dim=1),
                 (
-                    weights.chunk(num_chunks, dim=1)
-                    if weights is not None
+                    reference_logprobs.chunk(num_chunks, dim=1)
+                    if reference_logprobs is not None
                     else [None] * num_chunks
                 ),
                 (
-                    reference_logprobs.chunk(num_chunks, dim=1)
-                    if reference_logprobs is not None
+                    weights.chunk(num_chunks, dim=1)
+                    if weights is not None
                     else [None] * num_chunks
                 ),
             ):
@@ -251,6 +252,9 @@ class PPOLoss(nn.Module):
         # Shape: (batch_size * sequence_length,)
         advantages = shift(advantages).view(-1)
         logprobs = shift(logprobs).view(-1)  # Shape: (batch_size * sequence_length,)
+        if reference_logprobs is not None:
+            # Shape: (batch_size * sequence_length,)
+            reference_logprobs = shift(reference_logprobs).view(-1)
         if weights is not None:
             weights = shift(weights).view(-1)  # Shape: (batch_size * sequence_length,)
 
@@ -262,7 +266,7 @@ class PPOLoss(nn.Module):
         new_logprobs = dist.log_prob(tokens)  # Shape: (batch_size * sequence_length,)
 
         # Debugging
-        if False:
+        if True:
             # Shape: (batch_size * sequence_length,)
             kl_divergence = torch.nn.functional.kl_div(
                 new_logprobs, logprobs, reduction="none", log_target=True
@@ -315,9 +319,7 @@ class PPOLoss(nn.Module):
         if weights is not None:
             weights = weights[mask]
         else:
-            weights = torch.ones_like(
-                entropy, dtype=entropy.dtype, device=entropy.device
-            )
+            weights = torch.ones_like(entropy, device=entropy.device)
 
         if self.normalize_advantages:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -337,7 +339,8 @@ class PPOLoss(nn.Module):
 
         if values is not None:
             # Calculate the value loss
-            value_preds = logits.gather(-1, tokens)[mask]  # Shape: (num_tokens,)
+            # Shape: (num_tokens,)
+            value_preds = logits.gather(-1, tokens.unsqueeze(-1)).squeeze(-1)[mask]
             if self.normalize_values:
                 values = (values - values.mean()) / (values.std() + 1e-8)
             if self.normalize_value_predictions:
@@ -345,7 +348,11 @@ class PPOLoss(nn.Module):
                     value_preds.std() + 1e-8
                 )
             value_loss = (
-                torch.nn.functional.mse_loss(value_preds, values, reduction="none")
+                torch.nn.functional.mse_loss(
+                    value_preds.to(torch.bfloat16),
+                    values.to(torch.bfloat16),
+                    reduction="none",
+                )
                 .mul(weights)
                 .sum()
             )
