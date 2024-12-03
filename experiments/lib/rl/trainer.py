@@ -1,6 +1,7 @@
-from aioitertools.builtins import iter, enumerate as aenumerate
+from aioitertools.builtins import iter, enumerate as aenumerate, next as anext
 from aioitertools import itertools as ait
 from aioitertools.helpers import maybe_await
+from aioitertools.types import AnyIterable
 import asyncio
 import glob
 import math
@@ -32,7 +33,7 @@ from .completion import Completion, SplitMethod
 from .completion_sampler import SamplingKwargs, CompletionSampler, CompletionSamplerPool
 from .episode import Episode
 from .explore_result import ExploreResult
-from .pack import packed_tensors, PackedDataset, PackedTensors, packed_tensors_to_dir
+from .pack import packed_tensors, PackedDataset, PackedTensors
 from .recipe import ComponentConfig, recipe_main, TuneRecipeConfig
 from ..tokenizer import Tokenizer
 from ..vllm import start_vllms, vLLM
@@ -56,7 +57,9 @@ class Trainer:
         samples_per_episode: Optional[int] = None,
         branch_factor: int = 2,
         get_recovery_pattern: Optional[Callable[[], Optional[str]]] = None,
-        reference_client_and_model: Optional[tuple[AsyncOpenAI, str]] = None,
+        reference_clients_and_model: Optional[
+            tuple[AnyIterable[AsyncOpenAI], str]
+        ] = None,
         reference_roundtrips_per_episode: int = 1,
         sample_probability_power: float = 1.0,
         sampling_kwargs: Optional[SamplingKwargs] = None,
@@ -111,7 +114,11 @@ class Trainer:
         self.samples_per_episode = samples_per_episode or branch_factor
         self.branch_factor = branch_factor
         self.get_recovery_pattern = get_recovery_pattern or (lambda: None)
-        self.reference_client_and_model = reference_client_and_model
+        self.reference_clients_and_model = (
+            (ait.cycle(reference_clients_and_model[0]), reference_clients_and_model[1])
+            if reference_clients_and_model
+            else None
+        )
         self.reference_roundtrips_per_episode = reference_roundtrips_per_episode
         self.sample_probability_power = sample_probability_power
         self.sampling_kwargs = sampling_kwargs or {}
@@ -436,11 +443,12 @@ class Trainer:
                 self._substitute_episodes[episode] = substitute
                 return await self._explore_episode(substitute, pbar, priority)
         pbar.update(frac or 0)
-        if self.reference_client_and_model:
-            client, model = self.reference_client_and_model
+        if self.reference_clients_and_model:
+            clients, model = self.reference_clients_and_model
             if model == self.model:
                 return episode
             leaves = list(episode.completion.leaves(model=self.model))
+            client = await anext(clients)
             for offset in range(self.reference_roundtrips_per_episode):
                 await asyncio.gather(
                     *(
@@ -453,7 +461,10 @@ class Trainer:
         return episode
 
     async def _get_reference_logprobs(
-        self, completion: Completion, client: AsyncOpenAI, model: str
+        self,
+        completion: Completion,
+        client: AsyncOpenAI,
+        model: str,
     ) -> None:
         tokens = completion.all_tokens(self.tokenizer, cache=True).tolist()
         plain_completion = await client.completions.create(
