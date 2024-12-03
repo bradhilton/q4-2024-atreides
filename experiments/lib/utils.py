@@ -29,6 +29,11 @@ def get_token(token_logprob: ChatCompletionTokenLogprob) -> str:
     return token_logprob.token
 
 
+def get_token_id(token_logprob: ChatCompletionTokenLogprob) -> int:
+    assert token_logprob.token.startswith("token_id:"), "Unable to recover token ID"
+    return int(token_logprob.token.removeprefix("token_id:"))
+
+
 def read_last_n_lines(filename: str, n: int) -> str:
     """Read the last n lines of a file efficiently.
 

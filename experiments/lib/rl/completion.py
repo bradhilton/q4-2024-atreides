@@ -40,7 +40,7 @@ from typing import (
 )
 
 from ..tokenizer import Tokenizer
-from ..utils import get_token
+from ..utils import get_token, get_token_id
 
 
 class ChatCompletionUserMessageParamOverride(
@@ -86,6 +86,7 @@ class Completion:
         self._cached_values: dict[tuple[Optional[str], Optional[bool]], float] = {}
         self._cached_sample_weights: dict[tuple[Optional[str], float], float] = {}
         self._cached_tokens: Optional[torch.Tensor] = None
+        self._cached_tokens_and_mask: Optional[tuple[torch.Tensor, torch.Tensor]] = None
         for child in self.children:
             if child.parent is not self:
                 raise ValueError("Child completion's parent must be this completion.")
@@ -314,6 +315,7 @@ class Completion:
         self.parent._cached_values = {}
         self.parent._cached_sample_weights = {}
         self.parent._cached_tokens = None
+        self.parent._cached_tokens_and_mask = None
         return self.parent
 
     def message_params(
@@ -446,14 +448,6 @@ class Completion:
             self._cached_tokens = tokens
         return tokens
 
-    def tokens2(
-        self,
-        tokenizer: Tokenizer,
-        *,
-        cache: bool = False,
-        replacement_token: Optional[str] = None,
-    ) -> torch.Tensor: ...
-
     def all_tokens(
         self,
         tokenizer: Tokenizer,
@@ -473,6 +467,111 @@ class Completion:
                 )
             )
         return self.tokens(tokenizer, cache=cache, replacement_token=replacement_token)
+
+    def tokens_and_mask(
+        self, tokenizer: Tokenizer, *, cache: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if cache and self._cached_tokens_and_mask is not None:
+            return self._cached_tokens_and_mask
+        tokens_and_masks: list[tuple[torch.Tensor, bool]] = []
+        for i, message in enumerate(self.messages):
+            tokens = tokenizer.encode(
+                [
+                    (
+                        {
+                            "role": role(message),
+                            "content": "!",
+                        }
+                        if isinstance(message, Choice)
+                        else message
+                    )
+                ],
+                remove_bos=self.parent is not None or i > 0,
+                first_message_is_continuation=(
+                    i == 0
+                    and self.parent is not None
+                    and role(self.parent.messages[-1]) == role(message) == "assistant"
+                ),
+                continue_final_message=(
+                    i + 1 == len(self.messages)
+                    and role(message) == "assistant"
+                    and any(
+                        role(child.messages[0]) == "assistant"
+                        for child in self.children
+                    )
+                ),
+            )
+            if isinstance(message, Choice):
+                assert message.logprobs
+                zero_idx: int = (tokens_and_masks == 0).nonzero()[0]  # type: ignore
+                tokens_and_masks.append((tokens[:zero_idx], False))
+                tokens_and_masks.append(
+                    (
+                        torch.tensor(
+                            [
+                                get_token_id(token_logprob)
+                                for token_logprob in (
+                                    message.logprobs.content
+                                    or message.logprobs.refusal
+                                    or []
+                                )
+                            ]
+                        ),
+                        True,
+                    )
+                )
+                tokens_and_masks.append((tokens[zero_idx + 1 :], False))
+            else:
+                tokens_and_masks.append((tokens, False))
+        tokens_and_mask = (
+            torch.cat([tokens for tokens, _ in tokens_and_masks]),
+            torch.cat(
+                [
+                    torch.full_like(tokens, mask, dtype=torch.bool)
+                    for tokens, mask in tokens_and_masks
+                ]
+            ),
+        )
+        if cache:
+            self._cached_tokens_and_mask = tokens_and_mask
+        return tokens_and_mask
+
+    def token_count2(self, tokenizer: Tokenizer, *, cache: bool = False) -> int:
+        return self.tokens_and_mask(tokenizer, cache=cache)[0].size(0)
+
+    def all_token_count2(self, tokenizer: Tokenizer, *, cache: bool = False) -> int:
+        return self.token_count2(tokenizer, cache=cache) + (
+            self.parent.all_token_count2(tokenizer, cache=cache) if self.parent else 0
+        )
+
+    def tokens2(
+        self,
+        tokenizer: Tokenizer,
+        *,
+        cache: bool = False,
+        replacement_token: Optional[str] = None,
+    ) -> torch.Tensor:
+        return self.tokens_and_mask(tokenizer, cache=cache)[0]
+
+    def all_tokens2(
+        self,
+        tokenizer: Tokenizer,
+        *,
+        cache: bool = False,
+        replacement_token: Optional[str] = None,
+    ) -> torch.Tensor:
+        if self.parent:
+            return torch.cat(
+                (
+                    self.parent.all_tokens2(
+                        tokenizer, cache=cache, replacement_token=replacement_token
+                    ),
+                    self.tokens2(
+                        tokenizer, cache=cache, replacement_token=replacement_token
+                    ),
+                )
+            )
+        return self.tokens2(tokenizer, cache=cache, replacement_token=replacement_token)
 
     def sample_weight(
         self, cache: bool = False, model: Optional[str] = None, power: float = 1.0
@@ -582,6 +681,7 @@ class Completion:
                 self.reward = 0.0
                 self.children = {child}
                 self._cached_tokens = None
+                self._cached_tokens_and_mask = None
                 return True
         return False
 
