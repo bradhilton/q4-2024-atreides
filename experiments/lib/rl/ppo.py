@@ -266,7 +266,7 @@ class PPOLoss(nn.Module):
         new_logprobs = dist.log_prob(tokens)  # Shape: (batch_size * sequence_length,)
 
         # Debugging
-        if True:
+        if False:
             # Shape: (batch_size * sequence_length,)
             kl_divergence = torch.nn.functional.kl_div(
                 new_logprobs, logprobs, reduction="none", log_target=True

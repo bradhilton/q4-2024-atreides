@@ -405,69 +405,6 @@ class Completion:
             yield from self.parent.all_token_advantages(cache=cache, model=model)
         yield from self.token_advantages(cache=cache, model=model)
 
-    def token_count(self, tokenizer: Tokenizer, *, cache: bool = False) -> int:
-        return self.tokens(tokenizer, cache=cache).size(0)
-
-    def all_token_count(self, tokenizer: Tokenizer, *, cache: bool = False) -> int:
-        return self.token_count(tokenizer, cache=cache) + (
-            self.parent.all_token_count(tokenizer, cache=cache) if self.parent else 0
-        )
-
-    def tokens(
-        self,
-        tokenizer: Tokenizer,
-        *,
-        cache: bool = False,
-        replacement_token: Optional[str] = None,
-    ) -> torch.Tensor:
-        if cache and self._cached_tokens is not None and replacement_token is None:
-            return self._cached_tokens
-        tokens = tokenizer.encode(
-            self.message_params(replacement_token=replacement_token),  # type: ignore
-            remove_bos=self.parent is not None,
-            first_message_is_continuation=(
-                self.parent is not None
-                and (
-                    role(self.parent.messages[-1])
-                    == role(self.messages[0])
-                    == "assistant"
-                )
-            ),
-            continue_final_message=role(self.messages[-1]) == "assistant"
-            and any(role(child.messages[0]) == "assistant" for child in self.children),
-            replace_suffix=(
-                ("<|im_end|>\n", "\n")
-                if isinstance(self.messages[-1], Choice)
-                and self.messages[-1].logprobs
-                and self.messages[-1].logprobs.content
-                and get_token(self.messages[-1].logprobs.content[-1]) == "<|im_end|>"
-                else None
-            ),
-        )
-        if cache and replacement_token is None:
-            self._cached_tokens = tokens
-        return tokens
-
-    def all_tokens(
-        self,
-        tokenizer: Tokenizer,
-        *,
-        cache: bool = False,
-        replacement_token: Optional[str] = None,
-    ) -> torch.Tensor:
-        if self.parent:
-            return torch.cat(
-                (
-                    self.parent.all_tokens(
-                        tokenizer, cache=cache, replacement_token=replacement_token
-                    ),
-                    self.tokens(
-                        tokenizer, cache=cache, replacement_token=replacement_token
-                    ),
-                )
-            )
-        return self.tokens(tokenizer, cache=cache, replacement_token=replacement_token)
-
     def tokens_and_mask(
         self, tokenizer: Tokenizer, *, cache: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -503,7 +440,7 @@ class Completion:
             )
             if isinstance(message, Choice):
                 assert message.logprobs
-                zero_idx: int = (tokens_and_masks == 0).nonzero()[0]  # type: ignore
+                zero_idx: int = (tokens == 0).nonzero()[0]  # type: ignore
                 tokens_and_masks.append((tokens[:zero_idx], False))
                 tokens_and_masks.append(
                     (
@@ -536,42 +473,31 @@ class Completion:
             self._cached_tokens_and_mask = tokens_and_mask
         return tokens_and_mask
 
-    def token_count2(self, tokenizer: Tokenizer, *, cache: bool = False) -> int:
+    def token_count(self, tokenizer: Tokenizer, *, cache: bool = False) -> int:
         return self.tokens_and_mask(tokenizer, cache=cache)[0].size(0)
 
-    def all_token_count2(self, tokenizer: Tokenizer, *, cache: bool = False) -> int:
-        return self.token_count2(tokenizer, cache=cache) + (
-            self.parent.all_token_count2(tokenizer, cache=cache) if self.parent else 0
+    def all_token_count(self, tokenizer: Tokenizer, *, cache: bool = False) -> int:
+        return self.token_count(tokenizer, cache=cache) + (
+            self.parent.all_token_count(tokenizer, cache=cache) if self.parent else 0
         )
 
-    def tokens2(
+    def tokens(
         self,
         tokenizer: Tokenizer,
         *,
         cache: bool = False,
-        replacement_token: Optional[str] = None,
     ) -> torch.Tensor:
         return self.tokens_and_mask(tokenizer, cache=cache)[0]
 
-    def all_tokens2(
-        self,
-        tokenizer: Tokenizer,
-        *,
-        cache: bool = False,
-        replacement_token: Optional[str] = None,
-    ) -> torch.Tensor:
+    def all_tokens(self, tokenizer: Tokenizer, *, cache: bool = False) -> torch.Tensor:
         if self.parent:
             return torch.cat(
                 (
-                    self.parent.all_tokens2(
-                        tokenizer, cache=cache, replacement_token=replacement_token
-                    ),
-                    self.tokens2(
-                        tokenizer, cache=cache, replacement_token=replacement_token
-                    ),
+                    self.parent.all_tokens(tokenizer, cache=cache),
+                    self.tokens(tokenizer, cache=cache),
                 )
             )
-        return self.tokens2(tokenizer, cache=cache, replacement_token=replacement_token)
+        return self.tokens(tokenizer, cache=cache)
 
     def sample_weight(
         self, cache: bool = False, model: Optional[str] = None, power: float = 1.0

@@ -182,7 +182,7 @@ def packed_sequences(
             for terminus in terminus.ancestors(including_self=True):
                 if (
                     terminus.advantage(cache=True, model=model) != 0
-                    and len(terminus.tokens(tokenizer, cache=True)) <= sequence_length
+                    and terminus.token_count(tokenizer, cache=True) <= sequence_length
                 ):
                     break
             else:
@@ -244,25 +244,7 @@ def get_completion_tensors(
     tokenizer: Tokenizer,
     max_ancestors: int,
 ) -> dict[str, torch.Tensor]:
-    tokens = completion.tokens(tokenizer, cache=True)
-    # replacement_token, replacement_token_id = get_replacement_token(tokens, tokenizer)
-    # Hard coding this for now
-    replacement_token, replacement_token_id = "<|reserved_special_token_250|>", 128255
-    replaced_tokens = completion.tokens(tokenizer, replacement_token=replacement_token)
-    mask = replaced_tokens == replacement_token_id
-    if tokens.shape != replaced_tokens.shape:
-        tokens = replaced_tokens.clone()
-        tokens[mask] = torch.tensor(
-            tokenizer.llm.get_tokenizer()(
-                [
-                    get_token(token_logprob)
-                    for token_logprobs in completion._token_logprob_sequences()
-                    for token_logprob in token_logprobs
-                ],
-                add_special_tokens=False,
-                is_split_into_words=True,  # type: ignore
-            )["input_ids"]
-        )
+    tokens, mask = completion.tokens_and_mask(tokenizer, cache=True)
     values = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
     value = completion.value(cache=True, model=model)
     values[mask] = torch.tensor([value for _ in range(mask.sum())])
