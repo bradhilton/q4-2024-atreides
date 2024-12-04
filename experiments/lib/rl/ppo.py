@@ -45,15 +45,21 @@ tensor_field = lambda: field(default_factory=lambda: torch.tensor(0.0))
 @dataclass
 class PPOResult:
     policy_weight: torch.Tensor = tensor_field()
+    unclipped_policy_weight: torch.Tensor = tensor_field()
+    tanh_log_policy_weight: torch.Tensor = tensor_field()
     value_weight: torch.Tensor = tensor_field()
     entropy_weight: torch.Tensor = tensor_field()
+    entropy_target_weight: torch.Tensor = tensor_field()
     kl_weight: torch.Tensor = tensor_field()
     weighted_entropy_weight: torch.Tensor = tensor_field()
     weighted_kl_weight: torch.Tensor = tensor_field()
     weighted_ce_weight: torch.Tensor = tensor_field()
     policy_loss: torch.Tensor = tensor_field()
+    unclipped_policy_loss: torch.Tensor = tensor_field()
+    tanh_log_policy_loss: torch.Tensor = tensor_field()
     value_loss: torch.Tensor = tensor_field()
     entropy_bonus: torch.Tensor = tensor_field()
+    entropy_target: torch.Tensor = tensor_field()
     kl_divergence: torch.Tensor = tensor_field()
     weighted_entropy_bonus: torch.Tensor = tensor_field()
     weighted_kl_divergence: torch.Tensor = tensor_field()
@@ -63,6 +69,11 @@ class PPOResult:
     def named_tensors(self) -> Iterable[tuple[str, torch.Tensor]]:
         for field in fields(self):
             yield field.name, getattr(self, field.name)
+
+    def per_token(self) -> "PPOResult":
+        return PPOResult(
+            **{name: tensor / self.num_tokens for name, tensor in self.named_tensors()}
+        )
 
     def tensors(self) -> Iterable[torch.Tensor]:
         return (tensor for _, tensor in self.named_tensors())
@@ -78,11 +89,20 @@ class PPOResult:
         return self
 
     @property
+    def entropy_target_loss(self) -> torch.Tensor:
+        return torch.abs(self.entropy_bonus - self.entropy_target)
+
+    @property
     def total_loss(self) -> torch.Tensor:
         return (
             (self.policy_weight / self.num_tokens) * self.policy_loss
+            + (self.unclipped_policy_weight / self.num_tokens)
+            * self.unclipped_policy_loss
+            + (self.tanh_log_policy_weight / self.num_tokens)
+            * self.tanh_log_policy_loss
             + (self.value_weight / self.num_tokens) * self.value_loss
             - (self.entropy_weight / self.num_tokens) * self.entropy_bonus
+            + (self.entropy_target_weight / self.num_tokens) * self.entropy_target_loss
             + (self.kl_weight / self.num_tokens) * self.kl_divergence
             - (self.weighted_entropy_weight / self.num_tokens)
             * self.weighted_entropy_bonus
@@ -95,9 +115,13 @@ class PPOLoss(nn.Module):
     def __init__(
         self,
         policy_coef: float = 1.0,
+        unclipped_policy_coef: float = 0.0,
+        tanh_log_policy_coef: float = 0.0,
         clip_epsilon: float = 0.2,
         value_coef: float = 0.0,
         entropy_coef: float = 0.01,
+        entropy_target: float = 0.5,
+        entropy_target_coef: float = 0.0,
         kl_coef: float = 0.0,
         weighted_entropy_coef: float = 0.0,
         weighted_kl_coef: float = 0.0,
@@ -110,10 +134,14 @@ class PPOLoss(nn.Module):
         Initializes the PPO Loss module.
 
         Args:
-            policy_coef (float): Coefficient for the policy loss. Defaults to 1.0.
+            policy_coef (float): Coefficient for the clipped policy loss. Defaults to 1.0.
+            unclipped_policy_coef (float): Coefficient for the unclipped policy loss. Defaults to 0.0.
+            tanh_log_policy_coef (float): Coefficient for the tanh log policy loss. Defaults to 0.0.
             clip_epsilon (float): Clipping parameter for PPO (typically between 0.1 and 0.3).
             value_coef (float): Coefficient for the value loss (defaults to 0.0).
             entropy_coef (float): Coefficient for the entropy bonus to encourage exploration.
+            entropy_target (float): Target entropy (defaults to 0.5).
+            entropy_target_coef (float): Coefficient for the entropy target loss.
             kl_coef (float): Coefficient for KL divergence penalty (defaults to 0.0).
             weighted_entropy_coef (float): Coefficient for the weighted entropy bonus.
             weighted_kl_coef (float): Coefficient for the weighted KL divergence penalty.
@@ -124,9 +152,13 @@ class PPOLoss(nn.Module):
         """
         super().__init__()
         self.policy_coef = policy_coef
+        self.unclipped_policy_coef = unclipped_policy_coef
+        self.tanh_log_policy_coef = tanh_log_policy_coef
         self.clip_epsilon = clip_epsilon
         self.value_coef = value_coef
         self.entropy_coef = entropy_coef
+        self.entropy_target = entropy_target
+        self.entropy_target_coef = entropy_target_coef
         self.kl_coef = kl_coef
         self.weighted_entropy_coef = weighted_entropy_coef
         self.weighted_kl_coef = weighted_kl_coef
@@ -325,7 +357,8 @@ class PPOLoss(nn.Module):
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # Calculate the probability ratio (π_θ(a|s) / π_θ_old(a|s))
-        ratio = torch.exp(new_logprobs - logprobs)  # Shape: (num_tokens,)
+        log_ratio = new_logprobs - logprobs  # Shape: (num_tokens,)
+        ratio = torch.exp(log_ratio)  # Shape: (num_tokens,)
 
         # Calculate the surrogate losses
         surrogate1 = ratio * advantages  # Shape: (num_tokens,)
@@ -334,8 +367,16 @@ class PPOLoss(nn.Module):
             * advantages
         )  # Shape: (num_tokens,)
 
-        # Take the minimum of the two surrogate losses
+        # Take the minimum of the two surrogate losses for clipped version
         policy_loss = -torch.min(surrogate1, surrogate2).mul(weights).sum()  # Scalar
+
+        # Calculate unclipped policy loss
+        unclipped_policy_loss = -surrogate1.mul(weights).sum()  # Scalar
+
+        # Calculate tanh log policy loss
+        tanh_log_policy_loss = (
+            -torch.tanh(log_ratio).mul(advantages).mul(weights).sum()
+        )  # Scalar
 
         if values is not None:
             # Calculate the value loss
@@ -381,15 +422,21 @@ class PPOLoss(nn.Module):
 
         return PPOResult(
             policy_weight=self.policy_coef * num_tokens,
+            unclipped_policy_weight=self.unclipped_policy_coef * num_tokens,
+            tanh_log_policy_weight=self.tanh_log_policy_coef * num_tokens,
             value_weight=self.value_coef * num_tokens,
             entropy_weight=self.entropy_coef * num_tokens,
+            entropy_target_weight=self.entropy_target_coef * num_tokens,
             kl_weight=self.kl_coef * num_tokens,
             weighted_entropy_weight=self.weighted_entropy_coef * num_tokens,
             weighted_kl_weight=self.weighted_kl_coef * num_tokens,
             weighted_ce_weight=self.weighted_ce_coef * num_tokens,
             policy_loss=policy_loss,
+            unclipped_policy_loss=unclipped_policy_loss,
+            tanh_log_policy_loss=tanh_log_policy_loss,
             value_loss=value_loss,
             entropy_bonus=entropy_bonus,
+            entropy_target=self.entropy_target * num_tokens,
             kl_divergence=kl_divergence,
             weighted_entropy_bonus=weighted_entropy_bonus,
             weighted_kl_divergence=weighted_kl_divergence,

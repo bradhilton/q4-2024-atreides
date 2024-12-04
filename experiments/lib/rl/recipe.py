@@ -1050,41 +1050,37 @@ class TuneRecipe(FTRecipeInterface):
                     # Update the number of steps when the weights are updated
                     self.global_step += 1
 
-                    loss_to_log = (
-                        running_result.total_loss.item() / running_result.num_tokens
+                    per_token_result = running_result.per_token()
+                    loss_to_log = per_token_result.total_loss.item()
+                    policy_to_log = per_token_result.policy_loss.item()
+                    unclipped_policy_to_log = (
+                        per_token_result.unclipped_policy_loss.item()
                     )
-                    policy_to_log = (
-                        running_result.policy_loss.item() / running_result.num_tokens
+                    tanh_log_policy_to_log = (
+                        per_token_result.tanh_log_policy_loss.item()
                     )
-                    value_to_log = (
-                        running_result.value_loss.item() / running_result.num_tokens
-                    )
-                    entropy_to_log = (
-                        running_result.entropy_bonus.item() / running_result.num_tokens
-                    )
-                    kl_div_to_log = (
-                        running_result.kl_divergence.item() / running_result.num_tokens
-                    )
+                    value_to_log = per_token_result.value_loss.item()
+                    entropy_to_log = per_token_result.entropy_bonus.item()
+                    entropy_target_to_log = per_token_result.entropy_target_loss.item()
+                    kl_div_to_log = per_token_result.kl_divergence.item()
                     weighted_entropy_to_log = (
-                        running_result.weighted_entropy_bonus.item()
-                        / running_result.num_tokens
+                        per_token_result.weighted_entropy_bonus.item()
                     )
                     weighted_kl_div_to_log = (
-                        running_result.weighted_kl_divergence.item()
-                        / running_result.num_tokens
+                        per_token_result.weighted_kl_divergence.item()
                     )
-                    weighted_ce_to_log = (
-                        running_result.weighted_ce_loss.item()
-                        / running_result.num_tokens
-                    )
+                    weighted_ce_to_log = per_token_result.weighted_ce_loss.item()
                     pbar.update(1)
                     pbar.set_description(
                         f"{curr_epoch + 1}|{self.global_step}|Loss: {loss_to_log:.4f}"
                     )
                     pbar.set_postfix(
                         policy=f"{policy_to_log:.4f}",
+                        unclipped_policy=f"{unclipped_policy_to_log:.4f}",
+                        tanh_log_policy_to_log=f"{tanh_log_policy_to_log:.4f}",
                         value=f"{value_to_log:.4f}",
                         entropy=f"{entropy_to_log:.4f}",
+                        entropy_target=f"{entropy_target_to_log:.4f}",
                         kl_div=f"{kl_div_to_log:.4f}",
                         weighted_entropy=f"{weighted_entropy_to_log:.4f}",
                         weighted_kl_div=f"{weighted_kl_div_to_log:.4f}",
@@ -1101,8 +1097,11 @@ class TuneRecipe(FTRecipeInterface):
                             "loss": loss_to_log,
                             "lr": get_lr(self._optimizer or self._optim_ckpt_wrapper),
                             "policy": policy_to_log,
+                            "unclipped_policy": unclipped_policy_to_log,
+                            "tanh_log_policy": tanh_log_policy_to_log,
                             "value": value_to_log,
                             "entropy": entropy_to_log,
+                            "entropy_target": entropy_target_to_log,
                             "kl_div": kl_div_to_log,
                             "weighted_entropy": weighted_entropy_to_log,
                             "weighted_kl_div": weighted_kl_div_to_log,

@@ -67,7 +67,7 @@ class Trainer:
         split_separators: Optional[set[str]] = None,
         train_episodes: Episodes,
         episodes_per_iteration: Optional[int] = None,
-        patience_per_sample: float = 1.0,
+        patience_per_episode: float = 1.0,
         patience_per_val_sample: float = 5.0,
         patience_per_test_sample: float = 5.0,
         max_mask_sequence_batch_size: Optional[int] = None,
@@ -129,7 +129,7 @@ class Trainer:
         self.episodes_per_iteration: Optional[int] = (
             episodes_per_iteration or getattr(train_episodes, "__len__", lambda: None)()
         )
-        self.patience_per_sample = patience_per_sample
+        self.patience_per_episode = patience_per_episode
         self.patience_per_val_sample = patience_per_val_sample
         self.patience_per_test_sample = patience_per_test_sample
         self.max_mask_sequence_batch_size = max_mask_sequence_batch_size or max(
@@ -144,6 +144,7 @@ class Trainer:
             "test": test_samples_per_episode,
         }
         self.eval_scores: dict[str, dict[str, float]] = {"val": {}, "test": {}}
+        self.explore_results: list[ExploreResult] = []
         self.torchrun_kwargs = torchrun_kwargs or {}
         self.tune_episode_sample_fraction = tune_episode_sample_fraction
         self.tune_model = tune_model
@@ -367,14 +368,16 @@ class Trainer:
                 pbar.refresh()
             await asyncio.sleep(1e-6)  # yield to other tasks
         for future in asyncio.as_completed(tasks):
-            remaining_samples = self.samples_per_episode * (pbar.total - pbar.n)
-            patience = self.patience_per_sample * remaining_samples
+            remaining_episodes = self.samples_per_episode * (
+                len(tasks) - len(result.episodes)
+            )
+            patience = self.patience_per_episode * remaining_episodes
             try:
                 await asyncio.wait_for(future, timeout=patience)
             except asyncio.TimeoutError:
                 if verbosity > 0:
                     print(
-                        f"Early stopping exploration due to expired patience ({remaining_samples} remaining samples x {self.patience_per_sample} patience per sample = {patience} seconds)"
+                        f"Early stopping exploration due to expired patience ({remaining_episodes} remaining episodes x {self.patience_per_episode} patience per episode = {patience} seconds)"
                     )
                 for task in tasks:
                     task.cancel()
@@ -384,6 +387,7 @@ class Trainer:
                     result.add_exception(exception)
                 else:
                     raise exception
+        self.explore_results.append(result)
         return result.completed()
 
     async def _explore_episode(
