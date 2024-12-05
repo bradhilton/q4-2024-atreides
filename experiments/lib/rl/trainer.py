@@ -14,7 +14,7 @@ import sys
 import torch
 from torchtune.modules import TransformerDecoder
 from torchtune.training import cleanup_before_training, FullModelHFCheckpointer
-from torchtune.training.metric_logging import DiskLogger
+from torchtune.training.metric_logging import DiskLogger, WandBLogger
 from tqdm import tqdm
 from tqdm.notebook import tqdm_notebook
 from typing import (
@@ -28,6 +28,7 @@ from typing import (
     overload,
     Union,
 )
+import wandb
 
 from .completion import Completion, SplitMethod
 from .completion_sampler import SamplingKwargs, CompletionSampler, CompletionSamplerPool
@@ -89,6 +90,7 @@ class Trainer:
         vllm_min_time_between_requests: float = 0.0,
         vllm_num: int = 1,
         vllm_timeout: float = 120.0,
+        wandb_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
         self.output_dir = os.path.abspath(output_dir)
         os.makedirs(self.output_dir, exist_ok=True)
@@ -168,6 +170,8 @@ class Trainer:
             self.tqdm = tqdm_notebook
         except NameError:
             self.tqdm = tqdm
+        self._wandb_kwargs = wandb_kwargs
+        self._wandb_run = wandb.init(**wandb_kwargs) if wandb_kwargs else None
 
     @property
     def model(self) -> str:
@@ -307,6 +311,8 @@ class Trainer:
         pbar.close()
         score = get_score()
         self.eval_scores[split][self.model] = score
+        if self._wandb_run:
+            wandb.log({"split": score})
         if return_exceptions:
             return score, exceptions
         return score
@@ -533,9 +539,16 @@ class Trainer:
             model_type=self.tune_model_type,
         )
         if not self.tune_recipe_config.metric_logger:
-            self.tune_recipe_config.metric_logger = ComponentConfig(
-                DiskLogger, log_dir=self.output_dir + "/logs"
-            )
+            if self._wandb_kwargs:
+                kwargs = self._wandb_kwargs.copy()
+                kwargs["resume"] = "allow"
+                self.tune_recipe_config.metric_logger = ComponentConfig(
+                    WandBLogger, **kwargs
+                )
+            else:
+                self.tune_recipe_config.metric_logger = ComponentConfig(
+                    DiskLogger, log_dir=self.output_dir + "/logs"
+                )
         self.tune_recipe_config.model = ComponentConfig(self.tune_model)
         self.tune_recipe_config.dataset = ComponentConfig(
             PackedDataset, **result.disk_packed_tensors()
