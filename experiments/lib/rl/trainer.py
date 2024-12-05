@@ -312,7 +312,7 @@ class Trainer:
         score = get_score()
         self.eval_scores[split][self.model] = score
         if self._wandb_run:
-            wandb.log({"split": score})
+            wandb.log({split: score})
         if return_exceptions:
             return score, exceptions
         return score

@@ -105,6 +105,7 @@ class Clue:
         check_if_deductive_solver_and_cp_solver_grids_match: bool = True,
         return_first_solver_as_winner: bool = False,
         print_playthrough: bool = True,
+        max_turns: int = 1_000,
     ) -> "Clue":
         self.return_first_solver_as_winner = return_first_solver_as_winner
         self.solution = {
@@ -137,6 +138,8 @@ class Clue:
         )
         self.num_turns = 1
         for player in cycle(range(self.num_players)):
+            if self.num_turns > max_turns:
+                raise ValueError("Game took too many turns")
             deductive_grid = deductive_solver.grid(self, player)
             if print_playthrough:
                 print(f"Player {player + 1}'s Simple Solver Grid:")
@@ -146,7 +149,12 @@ class Clue:
                 ground_truth[~np.isnan(deductive_grid)],
                 err_msg="Non-NaN values in grid do not match ground truth",
             )
-            cp_grid = cp_solver.grid(self, player)
+            if (
+                print_playthrough
+                or check_cp_solver_grid
+                or check_if_deductive_solver_and_cp_solver_grids_match
+            ):
+                cp_grid = cp_solver.grid(self, player)
             if print_playthrough:
                 print(f"Player {player + 1}'s CP-SAT Solver Grid:")
                 self.print_grid(cp_grid)
