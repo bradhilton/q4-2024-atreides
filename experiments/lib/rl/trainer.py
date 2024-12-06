@@ -141,6 +141,10 @@ class Trainer:
             "val": val_episodes,
             "test": test_episodes,
         }
+        self.eval_exceptions = {
+            "val": [],
+            "test": [],
+        }
         self.eval_samples_per_episode = {
             "val": val_samples_per_episode,
             "test": test_samples_per_episode,
@@ -313,6 +317,7 @@ class Trainer:
         pbar.close()
         score = get_score()
         self.eval_scores[split][self.model] = score
+        self.eval_exceptions[split].extend(exceptions)
         if self._wandb_run:
             wandb.log({split: score})
         if return_exceptions:
