@@ -25,14 +25,11 @@ from pydantic import (
     model_validator,
     SkipValidation,
 )
-import random
 import torch
 from typing import (
-    cast,
     Iterable,
     Literal,
     Optional,
-    Self,
     Required,
     Sequence,
     TypeAlias,
@@ -233,6 +230,43 @@ class Completion:
 
     def max_depth(self, model: Optional[str] = None) -> int:
         return max(self.depths(model=model), default=0)
+
+    def entropy(self) -> float:
+        num_token_logprobs = self.num_token_logprobs()
+        if not num_token_logprobs:
+            return 0.0
+        return self.entropy_sum() / num_token_logprobs
+
+    def entropy_sum(self) -> float:
+        return (
+            torch.distributions.Categorical(
+                probs=torch.exp(
+                    torch.tensor(
+                        [
+                            [
+                                top_logprob.logprob
+                                for top_logprob in token_logprob.top_logprobs
+                            ]
+                            for token_logprobs in self._token_logprob_sequences()
+                            for token_logprob in token_logprobs
+                        ]
+                    )
+                )
+            )
+            .entropy()
+            .sum()
+        )
+
+    def all_entropy(self) -> float:
+        all_num_token_logprobs = self.all_num_token_logprobs()
+        if not all_num_token_logprobs:
+            return 0.0
+        return self.all_entropy_sum() / all_num_token_logprobs
+
+    def all_entropy_sum(self) -> float:
+        return self.entropy_sum() + (
+            self.parent.all_entropy_sum() if self.parent else 0.0
+        )
 
     def merge(self) -> "Completion":
         """
@@ -652,6 +686,11 @@ class Completion:
 
     def num_token_logprobs(self) -> int:
         return sum(len(sequence) for sequence in self._token_logprob_sequences())
+
+    def all_num_token_logprobs(self) -> int:
+        return self.num_token_logprobs() + (
+            self.parent.all_num_token_logprobs() if self.parent else 0
+        )
 
     def __eq__(self, other: object) -> bool:
         return self is other

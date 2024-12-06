@@ -150,6 +150,7 @@ class Trainer:
             "test": test_samples_per_episode,
         }
         self.eval_scores: dict[str, dict[str, float]] = {"val": {}, "test": {}}
+        self.eval_entropies: dict[str, dict[str, float]] = {"val": {}, "test": {}}
         self.explore_results: list[ExploreResult] = []
         self.torchrun_kwargs = torchrun_kwargs or {}
         self.tune_episode_sample_fraction = tune_episode_sample_fraction
@@ -242,11 +243,8 @@ class Trainer:
         episodes: list[Episode] = []
         exceptions: list[BaseException] = []
 
-        def get_score() -> float:
-            return sum(
-                episode.completion.value(cache=True, model=self.model)
-                for episode in episodes
-            ) / max(
+        def num_episodes_with_model_completions() -> int:
+            return max(
                 sum(
                     1
                     for episode in episodes
@@ -258,13 +256,37 @@ class Trainer:
                 1,
             )
 
+        def get_score() -> float:
+            return (
+                sum(
+                    episode.completion.value(cache=True, model=self.model)
+                    for episode in episodes
+                )
+                / num_episodes_with_model_completions()
+            )
+
+        def get_entropy() -> float:
+            return (
+                sum(
+                    leaf.all_entropy()
+                    for episode in episodes
+                    for leaf in episode.completion.leaves(model=self.model)
+                )
+                / num_episodes_with_model_completions()
+            )
+
         def done_callback(task: asyncio.Task[bool]) -> None:
             pbar.update(1)
             try:
                 task.result()
             except Exception as exception:
                 exceptions.append(exception)
-            pbar.set_postfix(avg=get_score(), exceptions=len(exceptions))
+            pbar.set_postfix(
+                avg=get_score(), entropy=get_entropy(), exceptions=len(exceptions)
+            )
+
+        sampling_kwargs = self.sampling_kwargs.copy()
+        sampling_kwargs["top_logprobs"] = 20
 
         async for episode in iter(
             self.eval_episodes[split] or (),
@@ -280,7 +302,7 @@ class Trainer:
                 episode.sample_completions_v2(
                     completion_sampler,
                     branch_factor=self.eval_samples_per_episode[split],
-                    sampling_kwargs=self.sampling_kwargs,
+                    sampling_kwargs=sampling_kwargs,
                 )
             )
             task.add_done_callback(done_callback)
@@ -316,10 +338,12 @@ class Trainer:
                     raise exception
         pbar.close()
         score = get_score()
+        entropy = get_entropy()
         self.eval_scores[split][self.model] = score
+        self.eval_entropies[split][self.model] = entropy
         self.eval_exceptions[split].extend(exceptions)
         if self._wandb_run:
-            wandb.log({split: score})
+            wandb.log({f"{split}": score, f"{split}_entropy": entropy})
         if return_exceptions:
             return score, exceptions
         return score
