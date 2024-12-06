@@ -238,23 +238,20 @@ class Completion:
         return self.entropy_sum() / num_token_logprobs
 
     def entropy_sum(self) -> float:
+        top_logprobs = torch.tensor(
+            [
+                [top_logprob.logprob for top_logprob in token_logprob.top_logprobs]
+                for token_logprobs in self._token_logprob_sequences()
+                for token_logprob in token_logprobs
+            ]
+        )
+        if not top_logprobs.size(0):
+            return 0.0
         return (
-            torch.distributions.Categorical(
-                probs=torch.exp(
-                    torch.tensor(
-                        [
-                            [
-                                top_logprob.logprob
-                                for top_logprob in token_logprob.top_logprobs
-                            ]
-                            for token_logprobs in self._token_logprob_sequences()
-                            for token_logprob in token_logprobs
-                        ]
-                    )
-                )
-            )
+            torch.distributions.Categorical(probs=torch.exp(top_logprobs))
             .entropy()
             .sum()
+            .item()
         )
 
     def all_entropy(self) -> float:
