@@ -170,7 +170,9 @@ class Trainer:
             self.tqdm = tqdm_notebook
         except NameError:
             self.tqdm = tqdm
-        self._wandb_kwargs = wandb_kwargs
+        self._wandb_kwargs = wandb_kwargs.copy() if wandb_kwargs else {}
+        if self._wandb_kwargs:
+            self._wandb_kwargs["resume"] = "allow"
         self._wandb_run = wandb.init(**wandb_kwargs) if wandb_kwargs else None
 
     @property
@@ -409,6 +411,8 @@ class Trainer:
             self.samples_per_episode - episode.num_samples(model=self.model), 0
         ):
             _frac = remaining_samples / self.samples_per_episode
+            if self.reference_clients_and_model:
+                _frac /= 2
             if frac:
                 pbar.update(round(frac - _frac, 4))
             frac = _frac
@@ -468,6 +472,7 @@ class Trainer:
                         ]
                     )
                 )
+            pbar.update(0.5)
         return episode
 
     async def _get_reference_logprobs(
@@ -540,10 +545,8 @@ class Trainer:
         )
         if not self.tune_recipe_config.metric_logger:
             if self._wandb_kwargs:
-                kwargs = self._wandb_kwargs.copy()
-                kwargs["resume"] = "allow"
                 self.tune_recipe_config.metric_logger = ComponentConfig(
-                    WandBLogger, **kwargs
+                    WandBLogger, **self._wandb_kwargs
                 )
             else:
                 self.tune_recipe_config.metric_logger = ComponentConfig(
