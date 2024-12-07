@@ -3,7 +3,9 @@ from aioitertools import itertools as ait
 from aioitertools.helpers import maybe_await
 from aioitertools.types import AnyIterable
 import asyncio
+from dataclasses import dataclass
 import glob
+import itertools as it
 import math
 from omegaconf import OmegaConf
 from openai import AsyncOpenAI
@@ -48,6 +50,16 @@ Episodes = Union[
 Verbosity = Literal[0, 1, 2]
 
 
+@dataclass
+class vLLMConfig:
+    env: Optional[dict[str, str]] = None
+    kwargs: Optional[dict[str, Any]] = None
+    max_concurrent_samples: int = 128
+    min_time_between_requests: float = 0.0
+    num: int = torch.cuda.device_count()
+    timeout: float = 120.0
+
+
 class Trainer:
     def __init__(
         self,
@@ -58,10 +70,10 @@ class Trainer:
         samples_per_episode: Optional[int] = None,
         branch_factor: int = 2,
         get_recovery_pattern: Optional[Callable[[], Optional[str]]] = None,
-        reference_clients_and_model: Optional[
-            tuple[AnyIterable[AsyncOpenAI], str]
-        ] = None,
+        reference_clients: Optional[AnyIterable[AsyncOpenAI]] = None,
+        reference_model: Optional[str] = None,
         reference_roundtrips_per_episode: int = 1,
+        reference_vllm_config: Optional[vLLMConfig] = None,
         sample_probability_power: float = 1.0,
         sampling_kwargs: Optional[SamplingKwargs] = None,
         split_method: SplitMethod = "count",
@@ -84,12 +96,7 @@ class Trainer:
         tune_run: bool = True,
         tune_run_env: Optional[dict[str, str]] = None,
         tune_sequence_length: int = 8192,
-        vllm_env: Optional[dict[str, str]] = None,
-        vllm_kwargs: Optional[dict[str, Any]] = None,
-        vllm_max_concurrent_samples: int = 128,
-        vllm_min_time_between_requests: float = 0.0,
-        vllm_num: int = 1,
-        vllm_timeout: float = 120.0,
+        vllm_config: Optional[vLLMConfig] = None,
         wandb_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
         self.output_dir = os.path.abspath(output_dir)
@@ -116,12 +123,12 @@ class Trainer:
         self.samples_per_episode = samples_per_episode or branch_factor
         self.branch_factor = branch_factor
         self.get_recovery_pattern = get_recovery_pattern or (lambda: None)
-        self.reference_clients_and_model = (
-            (ait.cycle(reference_clients_and_model[0]), reference_clients_and_model[1])
-            if reference_clients_and_model
-            else None
+        self.reference_clients = (
+            ait.cycle(reference_clients) if reference_clients else None
         )
+        self.reference_model = reference_model or base_model
         self.reference_roundtrips_per_episode = reference_roundtrips_per_episode
+        self.reference_vllm_config = reference_vllm_config or vLLMConfig()
         self.sample_probability_power = sample_probability_power
         self.sampling_kwargs = sampling_kwargs or {}
         self.split_by: SplitMethod = split_method
@@ -160,12 +167,7 @@ class Trainer:
         self.tune_run = tune_run
         self.tune_run_env = tune_run_env or {}
         self.tune_sequence_length = tune_sequence_length
-        self.vllm_kwargs = vllm_kwargs or {}
-        self.vllm_kwargs["env"] = vllm_env
-        self.vllm_kwargs["timeout"] = vllm_timeout
-        self.vllm_max_concurrent_requests = vllm_max_concurrent_samples
-        self.vllm_min_time_between_requests = vllm_min_time_between_requests
-        self.vllm_num = vllm_num
+        self.vllm_config = vllm_config or vLLMConfig()
         self._vllm_task: Optional[asyncio.Task[list[vLLM]]] = None
         self._completion_sampler: Optional[CompletionSampler] = None
         self.tokenizer = Tokenizer(base_model)
@@ -178,7 +180,10 @@ class Trainer:
         self._wandb_kwargs = wandb_kwargs.copy() if wandb_kwargs else {}
         if self._wandb_kwargs:
             self._wandb_kwargs["resume"] = "allow"
-        self._wandb_run = wandb.init(**self._wandb_kwargs) if self._wandb_kwargs else None
+            self._wandb_kwargs["reinit"] = True
+        self._wandb_run = (
+            wandb.init(**self._wandb_kwargs) if self._wandb_kwargs else None
+        )
 
     @property
     def model(self) -> str:
@@ -440,7 +445,7 @@ class Trainer:
             self.samples_per_episode - episode.num_samples(model=self.model), 0
         ):
             _frac = remaining_samples / self.samples_per_episode
-            if self.reference_clients_and_model:
+            if self.reference_clients:
                 _frac /= 2
             if frac:
                 pbar.update(round(frac - _frac, 4))
@@ -486,33 +491,36 @@ class Trainer:
                 self._substitute_episodes[episode] = substitute
                 return await self._explore_episode(substitute, pbar, priority)
         pbar.update(frac or 0)
-        if self.reference_clients_and_model:
-            clients, model = self.reference_clients_and_model
-            if model == self.model:
-                return episode
-            leaves = list(episode.completion.leaves(model=self.model))
-            client = await anext(clients)
-            for offset in range(self.reference_roundtrips_per_episode):
-                await asyncio.gather(
-                    *(
-                        self._get_reference_logprobs(leaf, client, model)
-                        for leaf in leaves[
-                            offset :: self.reference_roundtrips_per_episode
-                        ]
-                    )
-                )
+        if self.reference_clients and self.reference_model != self.model:
+            await self._get_episode_reference_logprobs(
+                episode, client=await anext(self.reference_clients)
+            )
             pbar.update(0.5)
         return episode
 
-    async def _get_reference_logprobs(
+    async def _get_episode_reference_logprobs(
+        self,
+        episode: Episode,
+        client: AsyncOpenAI,
+    ) -> Episode:
+        leaves = list(episode.completion.leaves(model=self.model))
+        for offset in range(self.reference_roundtrips_per_episode):
+            await asyncio.gather(
+                *(
+                    self._get_completion_reference_logprobs(leaf, client)
+                    for leaf in leaves[offset :: self.reference_roundtrips_per_episode]
+                )
+            )
+        return episode
+
+    async def _get_completion_reference_logprobs(
         self,
         completion: Completion,
         client: AsyncOpenAI,
-        model: str,
     ) -> None:
         tokens = completion.all_tokens(self.tokenizer, cache=True).tolist()
         plain_completion = await client.completions.create(
-            model=model,
+            model=self.reference_model,
             prompt=tokens,
             max_tokens=1,
             extra_body={
@@ -547,6 +555,41 @@ class Trainer:
 
     async def tune(self, result: ExploreResult, *, verbosity: Verbosity = 2) -> None:
         await self.stop_vllms()
+        if not self.reference_clients and self.reference_model != self.model:
+            reference_clients = it.cycle(
+                vllm.client
+                for vllm in await self.get_or_start_vllms(
+                    model=self.reference_model,
+                    config=self.vllm_config,
+                    verbosity=verbosity,
+                )
+            )
+            exceptions: list[BaseException] = []
+            pbar = self.tqdm(
+                desc="reference logprobs",
+                total=len(result.episodes),
+                unit="episode",
+                dynamic_ncols=True,
+                disable=not verbosity,
+            )
+            for future in asyncio.as_completed(
+                self._get_episode_reference_logprobs(episode, client)
+                for episode, client in zip(result.episodes, reference_clients)
+            ):
+                try:
+                    episode = await future
+                    for completion in episode.completion.descendants(
+                        including_self=True
+                    ):
+                        result.write_reference_logprobs(completion)
+                except BaseException as exception:
+                    exceptions.append(exception)
+                pbar.update(1)
+                pbar.set_postfix(exceptions=len(exceptions))
+            result.exceptions.extend(exceptions)
+            pbar.close()
+            await self.stop_vllms()
+
         if os.path.exists(os.path.abspath(self.model)):
             checkpoint_dir = os.path.abspath(self.model)
             checkpoint_files = None
@@ -717,13 +760,15 @@ class Trainer:
             self._completion_sampler = None
         if self._completion_sampler:
             return self._completion_sampler
-        vllms = await self.get_or_start_vllms(verbosity=verbosity)
+        vllms = await self.get_or_start_vllms(
+            model=self.model, config=self.vllm_config, verbosity=verbosity
+        )
         self._completion_sampler = CompletionSamplerPool(
             [
                 CompletionSampler(
                     vllm.client,
-                    max_concurrent_samples=self.vllm_max_concurrent_requests,
-                    min_time_between_requests=self.vllm_min_time_between_requests,
+                    max_concurrent_samples=self.vllm_config.max_concurrent_samples,
+                    min_time_between_requests=self.vllm_config.min_time_between_requests,
                     model=self.model,
                 )
                 for vllm in vllms
@@ -731,15 +776,19 @@ class Trainer:
         )
         return self._completion_sampler
 
-    async def get_or_start_vllms(self, *, verbosity: Verbosity = 2) -> list[vLLM]:
+    async def get_or_start_vllms(
+        self, *, model: str, config: vLLMConfig, verbosity: Verbosity = 2
+    ) -> list[vLLM]:
         if not self._vllm_task:
             self._vllm_task = asyncio.create_task(
                 start_vllms(
-                    model=self.model,
-                    n=self.vllm_num,
-                    max_concurrent_requests=self.vllm_max_concurrent_requests,
+                    model=model,
+                    n=config.num,
+                    timeout=config.timeout,
+                    env=config.env,
+                    max_concurrent_requests=config.max_concurrent_samples,
                     verbosity=verbosity,
-                    **self.vllm_kwargs,
+                    **config.kwargs or {},
                 )
             )
         try:

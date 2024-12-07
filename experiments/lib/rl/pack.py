@@ -20,6 +20,7 @@ class PackedTensors(TypedDict):
     weights: torch.Tensor
     mask: torch.Tensor
     input_pos: torch.Tensor
+    ids: torch.Tensor
 
 
 class DiskPackedTensors(TypedDict):
@@ -150,6 +151,7 @@ def packed_tensors(
         "weights": tensors["weights"],
         "mask": mask,
         "input_pos": tensors["input_pos"],
+        "ids": tensors["ids"],
     }
 
 

@@ -42,12 +42,6 @@ class ExploreResult:
         self.exceptions.append(exception)
         self._update_pbar_postfix()
 
-    def done_callback(self, task: asyncio.Task[Episode]) -> None:
-        try:
-            self._pack_episode(task.result())
-        except BaseException as exception:
-            self.add_exception(exception)
-
     def completed(self) -> "ExploreResult":
         self.pbar.n = len(self.episodes)
         self.pbar.close()
@@ -61,15 +55,28 @@ class ExploreResult:
                 packed_tensors["mask"][0][0][0] = True
         return self
 
-    def tensors(self) -> PackedTensors:
-        return packed_tensors_from_dir(**self.disk_packed_tensors())
-
     def disk_packed_tensors(self) -> DiskPackedTensors:
         return DiskPackedTensors(
             dir=self.tensor_dir,
             num_sequences=len(self.sequences),
             sequence_length=self.sequence_length,
         )
+
+    def done_callback(self, task: asyncio.Task[Episode]) -> None:
+        try:
+            self._pack_episode(task.result())
+        except BaseException as exception:
+            self.add_exception(exception)
+
+    def tensors(self) -> PackedTensors:
+        return packed_tensors_from_dir(**self.disk_packed_tensors())
+
+    def write_reference_logprobs(self, completion: Completion) -> None:
+        assert completion.reference_logprobs is not None
+        tensors = self.tensors()
+        mask = tensors["ids"] == id(completion)
+        repeat_counts = mask.sum() // completion.reference_logprobs.size(0)
+        tensors["reference_logprobs"][mask] = completion.reference_logprobs.repeat(repeat_counts)  # type: ignore
 
     def _update_pbar_postfix(self) -> None:
         self.pbar.set_postfix(
@@ -154,6 +161,7 @@ class ExploreResult:
             "advantages": torch.nan,
             "logprobs": torch.nan,
             "reference_logprobs": torch.nan,
+            "ids": 0,
             "input_pos": 0,
         }.items():
             packed_tensors[key][len(self.sequences)] = self._sequence_to_tensor(
