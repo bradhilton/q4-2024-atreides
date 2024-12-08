@@ -62,6 +62,7 @@ def packed_tensors_from_dir(**kwargs: Unpack[DiskPackedTensors]) -> PackedTensor
             "weights": torch.float32,
             "mask": torch.bool,
             "input_pos": torch.long,
+            "ids": torch.long,
         }.items()
     }  # type: ignore
 

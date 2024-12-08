@@ -38,8 +38,8 @@ from typing import (
 )
 from warnings import warn
 
+from .pack import PackedTensors
 from .ppo import PPOLoss, PPOResult
-from .trajectory import TrajectoryTensors
 
 log = utils.get_logger("DEBUG")
 
@@ -116,7 +116,7 @@ class TuneRecipeConfig(DictConfig):
         metric_logger: ComponentConfig[MetricLoggerInterface] = PLACEHOLDER,
         model: ComponentConfig[TransformerDecoder] = PLACEHOLDER,
         loss: ComponentConfig[PPOLoss] = ComponentConfig(PPOLoss),
-        dataset: ComponentConfig[Dataset[TrajectoryTensors]] = PLACEHOLDER,
+        dataset: ComponentConfig[Dataset[PackedTensors]] = PLACEHOLDER,
         shuffle: bool = False,
         batch_size: int = 1,
         fsdp_cpu_offload: Optional[bool] = None,
@@ -205,43 +205,6 @@ class TuneRecipeConfig(DictConfig):
 class TypedDataLoader(DataLoader[T]):
     def __iter__(self) -> Iterator[T]:
         return super().__iter__()
-
-
-def create_packed_causal_mask(tokens: torch.Tensor, *, bos_id: int) -> torch.Tensor:
-    """
-    Creates a causal attention mask for packed sequences, where each sequence starts with a BOS token.
-
-    Args:
-        tokens: Input tensor of shape [b x s] containing token ids
-        bos_token_id: Token ID used to mark the start of sequences.
-
-    Returns:
-        Boolean tensor of shape [b x s x s] where True means position i can attend to position j
-    """
-    _, seq_len = tokens.shape
-
-    # Compute causal mask
-    causal_mask = torch.tril(
-        torch.ones(seq_len, seq_len, dtype=torch.bool, device=tokens.device)
-    )
-
-    # Compute sequence IDs by cumulative sum of BOS tokens
-    seq_ids = torch.cumsum(tokens == bos_id, dim=-1)
-
-    # Determine if positions are in the same sequence
-    same_sequence = seq_ids.unsqueeze(-1) == seq_ids.unsqueeze(-2)
-
-    # Apply sequence boundary masking
-    causal_mask = causal_mask & same_sequence
-
-    return causal_mask
-
-
-def get_input_pos(tokens: torch.Tensor, *, bos_id: int) -> torch.Tensor:
-    """Returns position IDs relative to sequence starts in packed input."""
-    positions = torch.arange(tokens.size(1), device=tokens.device).expand_as(tokens)
-    seq_start_pos, _ = torch.cummax(positions * (tokens == bos_id).int(), dim=1)
-    return positions - seq_start_pos
 
 
 class TuneRecipe(FTRecipeInterface):
@@ -804,10 +767,10 @@ class TuneRecipe(FTRecipeInterface):
 
     def _setup_data(
         self,
-        cfg_dataset: ComponentConfig[Dataset[TrajectoryTensors]],
+        cfg_dataset: ComponentConfig[Dataset[PackedTensors]],
         shuffle: bool,
         batch_size: int,
-    ) -> Tuple[DistributedSampler, TypedDataLoader[TrajectoryTensors]]:
+    ) -> Tuple[DistributedSampler, TypedDataLoader[PackedTensors]]:
         """
         All data related setup happens here. Currently this recipe only supports the
         DistributedSamplers with Map-style Datasets which fit into memory. Other samplers,
@@ -986,33 +949,25 @@ class TuneRecipe(FTRecipeInterface):
 
                 utils.batch_to_device(batch, self._device)  # type: ignore - `batch_to_device` expects a `dict`, not a `TypedDict`, but this should be fine
 
-                # Assuming the first token in the batch is the bos token
-                bos_id = int(batch["tokens"].view(-1)[0].item())
-                mask = batch.get("mask")
-                if mask is None:
-                    mask = create_packed_causal_mask(batch["tokens"], bos_id=bos_id)
-                input_pos = batch.get("input_pos")
-                if input_pos is None:
-                    input_pos = get_input_pos(batch["tokens"], bos_id=bos_id)
-
                 with self.activations_handling_ctx:
                     logits = self._model(
                         tokens=batch["tokens"],
-                        mask=mask,
-                        input_pos=input_pos,
+                        mask=batch["mask"],
+                        input_pos=batch["input_pos"],
                     )
-                    del mask, input_pos
+                    del batch["mask"], batch["input_pos"]  # type: ignore
 
                 # Compute loss
                 current_result = self._loss_fn.forward(
                     logits=logits,
                     tokens=batch["tokens"],
-                    values=batch.get("values"),
+                    values=batch["values"],
                     advantages=batch["advantages"],
                     logprobs=batch["logprobs"],
-                    reference_logprobs=batch.get("reference_logprobs"),
-                    weights=batch.get("weights"),
-                    bos_id=bos_id,
+                    reference_logprobs=batch["reference_logprobs"],
+                    weights=batch["weights"],
+                    # Assuming the first token in the batch is the bos token
+                    bos_id=int(batch["tokens"].view(-1)[0].item()),
                 )
                 del logits, batch
 

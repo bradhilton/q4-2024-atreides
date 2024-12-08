@@ -129,6 +129,10 @@ class Trainer:
         self.reference_model = reference_model or base_model
         self.reference_roundtrips_per_episode = reference_roundtrips_per_episode
         self.reference_vllm_config = reference_vllm_config or vLLMConfig()
+        self.reference_clients_semaphore = asyncio.Semaphore(
+            self.reference_vllm_config.num
+            * self.reference_vllm_config.max_concurrent_samples
+        )
         self.sample_probability_power = sample_probability_power
         self.sampling_kwargs = sampling_kwargs or {}
         self.split_by: SplitMethod = split_method
@@ -519,14 +523,15 @@ class Trainer:
         client: AsyncOpenAI,
     ) -> None:
         tokens = completion.all_tokens(self.tokenizer, cache=True).tolist()
-        plain_completion = await client.completions.create(
-            model=self.reference_model,
-            prompt=tokens,
-            max_tokens=1,
-            extra_body={
-                "prompt_logprobs": True,
-            },
-        )
+        async with self.reference_clients_semaphore:
+            plain_completion = await client.completions.create(
+                model=self.reference_model,
+                prompt=tokens,
+                max_tokens=1,
+                extra_body={
+                    "prompt_logprobs": True,
+                },
+            )
         prompt_logprobs: list[dict[str, dict[str, Any]]] = plain_completion.choices[0].prompt_logprobs  # type: ignore
         reference_logprobs = [
             (prompt_logprob[str(token)]["logprob"] if prompt_logprob else torch.nan)
@@ -560,7 +565,7 @@ class Trainer:
                 vllm.client
                 for vllm in await self.get_or_start_vllms(
                     model=self.reference_model,
-                    config=self.vllm_config,
+                    config=self.reference_vllm_config,
                     verbosity=verbosity,
                 )
             )
@@ -589,7 +594,6 @@ class Trainer:
             result.exceptions.extend(exceptions)
             pbar.close()
             await self.stop_vllms()
-
         if os.path.exists(os.path.abspath(self.model)):
             checkpoint_dir = os.path.abspath(self.model)
             checkpoint_files = None
