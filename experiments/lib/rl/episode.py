@@ -1,5 +1,7 @@
 import asyncio
+from collections import Counter
 from dataclasses import dataclass
+import numpy as np
 from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
 from openai.types.chat.chat_completion_assistant_message_param import (
     ChatCompletionAssistantMessageParam,
@@ -8,11 +10,11 @@ from typing import (
     Any,
     Callable,
     Coroutine,
+    Iterable,
     Literal,
     Optional,
-    overload,
     Protocol,
-    Sequence,
+    Unpack,
 )
 
 from .completion import Completion, SplitMethod
@@ -25,8 +27,8 @@ from ..tokenizer import Tokenizer
 class EpisodeCompletion:
     _completion: Completion
     _sampler: CompletionSampler
-    _sampling_kwargs: Optional[SamplingKwargs] = None
-    _priority: Optional[int] = None
+    _sampling_kwargs: SamplingKwargs
+    _priority: Optional[int]
 
     @property
     def last_assistant_message(self) -> ChatCompletionAssistantMessageParam:
@@ -52,14 +54,21 @@ class EpisodeCompletion:
         self._completion.commit(reward)
 
     async def follow_up(
-        self, messages: list[ChatCompletionMessageParam]
+        self,
+        messages: list[ChatCompletionMessageParam],
+        **sampling_kwargs: Unpack[SamplingKwargs],  # type: ignore
     ) -> "EpisodeCompletion":
         completions = await self._sampler.sample_completions(
             Completion(parent=self._completion, messages=messages),
             priority=self._priority or 0,
-            **self._sampling_kwargs or {},
+            **{**self._sampling_kwargs, **sampling_kwargs, "n": 1},
         )
-        return EpisodeCompletion(_completion=completions[0], _sampler=self._sampler)
+        return EpisodeCompletion(
+            _completion=completions[0],
+            _sampler=self._sampler,
+            _sampling_kwargs=self._sampling_kwargs,
+            _priority=self._priority,
+        )
 
 
 class SampleEpisode(Protocol):
@@ -193,25 +202,51 @@ class Episode:
     async def sample_completions_v2(
         self,
         completion_sampler: CompletionSampler,
+        num_parents: int,
         branch_factor: int,
         get_recovery_pattern: Optional[Callable[[], Optional[str]]] = None,
-        max_parallel_splits: int = 1,
+        max_splits_per_completion: int = 1,
         priority: Optional[int] = None,
         sample_probability_power: float = 1.0,
         sampling_kwargs: Optional[SamplingKwargs] = None,
         split_by: SplitMethod = "count",
+        split_point_std_deviation: float = 0.0,
         split_separators: Optional[set[str]] = None,
     ) -> bool:
+        """Sample completions for the episode.
+
+        Args:
+            completion_sampler: The completion sampler to use.
+            num_parents: The number of parents to sample completions from.
+            branch_factor: The number of completions to sample per parent.
+            get_recovery_pattern: A function that returns a recovery pattern to use.
+            max_splits_per_completion: The maximum number of splits to perform per completion.
+            priority: The priority of the completions.
+            sample_probability_power: The power to use for the sample probability.
+            sampling_kwargs: The sampling kwargs to use.
+            split_by: The method to use for splitting.
+            split_point_std_deviation: The standard deviation to use for sampling split points.
+                A deviation of 0 is deterministic while larger values approach uniform sampling.
+            split_separators: The separators to use for splitting.
+
+        Returns:
+            True if any completions were sampled, False otherwise.
+        """
         model = await completion_sampler.get_model()
-        parents = self._get_sampleable_parents(
-            max_parallel_splits,
-            model,
-            sample_probability_power,
-            branch_factor > 1,
-            split_by,
-            split_separators,
-        )
-        if not parents:
+        if not any(child.model == model for child in self.completion.children):
+            parents = [self.completion]
+        elif branch_factor > 1:
+            parents = self._get_sampleable_parents(
+                branch_factor,
+                num_parents,
+                max_splits_per_completion,
+                model,
+                sample_probability_power,
+                split_by,
+                split_point_std_deviation,
+                split_separators,
+            )
+        else:
             return False
         return any(
             await asyncio.gather(
@@ -220,7 +255,11 @@ class Episode:
                         parent,
                         model,
                         completion_sampler,
-                        branch_factor,
+                        branch_factor=(
+                            max(branch_factor, num_parents * (branch_factor - 1))
+                            if len(parents) == 1
+                            else branch_factor
+                        ),
                         fork_decay=1.0,
                         get_recovery_pattern=get_recovery_pattern,
                         split_separators=split_separators or set(),
@@ -234,33 +273,114 @@ class Episode:
 
     def _get_sampleable_parents(
         self,
-        max_parallel_splits: int,
+        branch_factor: int,
+        num_parents: int,
+        max_splits_per_completion: int,
         model: str,
         sample_probability_power: float,
-        split: bool,
         split_method: SplitMethod,
+        split_point_std_deviation: float,
         split_separators: Optional[set[str]],
     ) -> list[Completion]:
-        if not any(child.model == model for child in self.completion.children):
-            return [self.completion]
-        if not split:
-            return []
-        completions = sorted(
-            (
-                c
-                for c in self.completion.descendants(model=model)
-                if c.max_splits(by=split_method, separators=split_separators) > 0
-            ),
-            key=lambda c: abs(c.advantage(cache=True, model=model))
+        """Get the parents to sample completions from.
+
+        This function selects a set of completions to split and sample from,
+        based on a scoring system that considers the advantage, split weight,
+        number of tokens, and sample weight of each completion.
+
+        Args:
+            branch_factor: The number of completions to sample per parent.
+            num_parents: The number of parents to sample completions from.
+            max_splits_per_completion: The maximum number of splits to perform on a single completion.
+            model: The model to use.
+            sample_probability_power: The power to use for the sample probability.
+            split: Whether to split the completions.
+            split_method: The method to use for splitting.
+            split_point_std_deviation: The standard deviation to use for the split point.
+            split_separators: The separators to use for splitting.
+
+        Returns:
+            A list of completions to sample from.
+        """
+        get_split_value: Callable[[Completion], float] = lambda c: (
+            abs(c.advantage(cache=True, model=model))
             * (c.split_weight(by=split_method) / c.num_token_logprobs())
-            * c.sample_weight(cache=True, model=model, power=sample_probability_power),
-            reverse=True,
-        )[:max_parallel_splits]
-        for parent in completions:
-            assert list(parent.split(by=split_method, separators=split_separators))[
-                :-1
-            ], "Unable to split completion"
-        return completions
+            * c.sample_weight(cache=True, model=model, power=sample_probability_power)
+        )
+
+        # Create a Counter to track the number of times each completion is selected
+        # for splitting.
+        completions = Counter(
+            c
+            for c, _ in sorted(
+                (
+                    (
+                        c,
+                        split_value
+                        / (split + 1)
+                        * (1 / branch_factor) ** (sample_probability_power * split),
+                    )
+                    for c, max_splits, split_value in (
+                        (
+                            c,
+                            max_splits,
+                            get_split_value(c),
+                        )
+                        for c, max_splits in (
+                            (
+                                c,
+                                min(
+                                    num_parents,
+                                    max_splits_per_completion,
+                                    c.max_splits(
+                                        by=split_method, separators=split_separators
+                                    ),
+                                ),
+                            )
+                            for c in self.completion.descendants(model=model)
+                        )
+                        if max_splits > 0
+                    )
+                    for split in range(max_splits)
+                ),
+                key=lambda x: x[1],
+            )[:num_parents]
+        )
+
+        # Split the selected completions and return the resulting parents.
+        return [
+            parent
+            for completion, num_splits in completions.items()
+            for parent in list(
+                completion.split(
+                    by=split_method,
+                    at=self._split_points(num_splits, split_point_std_deviation),
+                    separators=split_separators,
+                )
+            )[:-1]
+        ]
+
+    def _split_points(self, num_splits: int, std_deviation: float) -> Iterable[float]:
+        """Sample a sequence of split points.
+
+        Args:
+            num_splits: The number of split points to sample.
+            std_deviation: The standard deviation of the split points.
+
+        Yields:
+            The split points.
+        """
+        for i in range(num_splits):
+            split_point = (i + 1) / (num_splits + 1)
+            if std_deviation:
+                split_point = np.random.normal(split_point, std_deviation / num_splits)
+                if split_point < 0 or split_point >= 1:
+                    # If the split point is out of bounds, sample a new one using a
+                    # uniform distribution.
+                    split_point = np.random.uniform()
+                yield split_point
+            else:
+                yield split_point
 
     async def _sample_completions(
         self,

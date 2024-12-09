@@ -310,6 +310,7 @@ class Trainer:
             task = asyncio.create_task(
                 episode.sample_completions_v2(
                     completion_sampler,
+                    num_parents=1,
                     branch_factor=self.eval_samples_per_episode[split],
                     sampling_kwargs=sampling_kwargs,
                 )
@@ -456,11 +457,11 @@ class Trainer:
             frac = _frac
             if not await episode.sample_completions_v2(
                 completion_sampler=completion_sampler,
-                branch_factor=self.branch_factor,
-                get_recovery_pattern=self.get_recovery_pattern,
-                max_parallel_splits=int(
+                num_parents=int(
                     math.ceil(remaining_samples / (self.branch_factor - 1))
                 ),
+                branch_factor=self.branch_factor,
+                get_recovery_pattern=self.get_recovery_pattern,
                 priority=priority,
                 sample_probability_power=self.sample_probability_power,
                 sampling_kwargs=self.sampling_kwargs,
