@@ -29,6 +29,7 @@ from typing import (
     Generic,
     Iterator,
     List,
+    Mapping,
     Optional,
     overload,
     ParamSpec,
@@ -39,7 +40,7 @@ from typing import (
 from warnings import warn
 
 from .pack import PackedTensors
-from .ppo import PPOLoss, PPOResult
+from .ppo import PPOLoss, PPOResult, shift_tensor
 
 log = utils.get_logger("DEBUG")
 
@@ -127,6 +128,7 @@ class TuneRecipeConfig(DictConfig):
         enable_activation_checkpointing: Optional[bool] = None,
         enable_activation_offloading: Optional[bool] = None,
         save_intermediate_checkpoints: Optional[bool] = None,
+        reference_checkpointer: Optional[ComponentConfig[Checkpointer]] = None,
         compile: Optional[bool] = None,
         custom_sharded_layers: Optional[List[str]] = None,
         fsdp_reshard_after_forward: Optional[bool] = None,
@@ -167,6 +169,8 @@ class TuneRecipeConfig(DictConfig):
             self.enable_activation_offloading = enable_activation_offloading
         if save_intermediate_checkpoints is not None:
             self.save_intermediate_checkpoints = save_intermediate_checkpoints
+        if reference_checkpointer is not None:
+            self.reference_checkpointer = reference_checkpointer
         if compile is not None:
             self.compile = compile
         if custom_sharded_layers is not None:
@@ -456,6 +460,12 @@ class TuneRecipe(FTRecipeInterface):
             self._metric_logger.log_config(cfg)
 
         checkpoint_dict = self.load_checkpoint(cfg_checkpointer=cfg.checkpointer)
+        if reference_checkpointer_cfg := cfg.get("reference_checkpointer", None):
+            self.reference_model_state_dict = instantiate_component(
+                reference_checkpointer_cfg
+            ).load_checkpoint()[training.MODEL_KEY]
+        else:
+            self.reference_model_state_dict = None
 
         self._compile: bool = cfg.get("compile", False)
         if self._compile:
@@ -468,6 +478,7 @@ class TuneRecipe(FTRecipeInterface):
             fsdp_cpu_offload=cfg.get("fsdp_cpu_offload", False),
             reshard_after_forward=cfg.get("fsdp_reshard_after_forward", True),
             model_state_dict=checkpoint_dict[training.MODEL_KEY],
+            reference_model_state_dict=self.reference_model_state_dict,
             ac_mode=cfg.get("ac_mode", None),
             ac_option=cfg.get("ac_option", None),
         )
@@ -604,6 +615,7 @@ class TuneRecipe(FTRecipeInterface):
         fsdp_cpu_offload: bool,
         reshard_after_forward: bool,
         model_state_dict: Dict[str, Any],
+        reference_model_state_dict: Optional[Dict[str, Any]] = None,
         custom_sharded_layers: Optional[List[str]] = None,
         ac_mode: Optional[str] = None,
         ac_option: Optional[int] = None,
@@ -681,6 +693,34 @@ class TuneRecipe(FTRecipeInterface):
                 strict=True,
                 cpu_offload=fsdp_cpu_offload,
             )
+
+            if reference_model_state_dict:
+                # Temporarily patch model.load_state_dict to capture the sharded parameter tensors
+                # for this rank when loading the reference model. This allows us to maintain a
+                # reference copy of the sharded parameters that matches the FSDP sharding pattern,
+                # which is needed for weight swapping during training.
+                load_state_dict = model.load_state_dict
+
+                def patch(
+                    state_dict: Mapping[str, Any],
+                    strict: bool = True,
+                    assign: bool = False,
+                ) -> Any:
+                    reference_model_state_dict.clear()
+                    reference_model_state_dict.update(state_dict)
+
+                model.load_state_dict = patch
+
+                training.load_from_full_model_state_dict(
+                    model,
+                    reference_model_state_dict,
+                    self._device,
+                    self._is_rank_zero,
+                    strict=True,
+                    cpu_offload=fsdp_cpu_offload,
+                )
+
+                model.load_state_dict = load_state_dict
         else:
             model.load_state_dict(model_state_dict)
 
@@ -949,6 +989,32 @@ class TuneRecipe(FTRecipeInterface):
 
                 utils.batch_to_device(batch, self._device)  # type: ignore - `batch_to_device` expects a `dict`, not a `TypedDict`, but this should be fine
 
+                # Assuming the first token in the batch is the bos token
+                bos_id = int(batch["tokens"].view(-1)[0].item())
+
+                if self.reference_model_state_dict:
+                    # Save current weights and load reference weights
+                    model_state_dict = self._swap_state(self.reference_model_state_dict)
+
+                    with self.activations_handling_ctx:
+                        logits = self._model(
+                            tokens=batch["tokens"],
+                            mask=batch["mask"],
+                            input_pos=batch["input_pos"],
+                        )
+                        # Calculate reference logprobs
+                        reference_logprobs: torch.Tensor = (
+                            torch.distributions.Categorical(logits=logits).log_prob(
+                                shift_tensor(batch["tokens"], ignore_label=bos_id)
+                            )
+                        )
+                        del logits
+
+                    # Restore original weights
+                    self._swap_state(model_state_dict)
+                else:
+                    reference_logprobs = batch["reference_logprobs"]
+
                 with self.activations_handling_ctx:
                     logits = self._model(
                         tokens=batch["tokens"],
@@ -964,10 +1030,9 @@ class TuneRecipe(FTRecipeInterface):
                     values=batch["values"],
                     advantages=batch["advantages"],
                     logprobs=batch["logprobs"],
-                    reference_logprobs=batch["reference_logprobs"],
+                    reference_logprobs=reference_logprobs,
                     weights=batch["weights"],
-                    # Assuming the first token in the batch is the bos token
-                    bos_id=int(batch["tokens"].view(-1)[0].item()),
+                    bos_id=bos_id,
                 )
                 del logits, batch
 
@@ -1111,6 +1176,28 @@ class TuneRecipe(FTRecipeInterface):
         if training.is_distributed():
             torch.distributed.destroy_process_group()
         training.cleanup_before_training()
+
+    def _swap_state(
+        self, state_dict: Dict[str, Any], assign: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Swaps the current model state with the provided state dict.
+        Manages GPU memory by moving states to CPU/device in the right order.
+
+        Args:
+            state_dict: Dictionary of state to load into model
+
+        Returns:
+            Original model state dict (moved to CPU)
+        """
+        # Save current model state and move to CPU
+        current_state = {k: v.to("cpu") for k, v in self._model.state_dict().items()}
+
+        # Move input state to device and load
+        device_state = {k: v.to(self._device) for k, v in state_dict.items()}
+        self._model.load_state_dict(device_state, assign=assign)
+
+        return current_state
 
 
 def recipe_main(cfg: TuneRecipeConfig) -> None:

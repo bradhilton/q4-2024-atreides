@@ -9,7 +9,7 @@ ignore_labels_cache: dict[
 ] = {}
 
 
-def shift(
+def shift_tensor(
     labels: torch.Tensor, ignore_label: Optional[Union[int, float]] = None
 ) -> torch.Tensor:
     if ignore_label is None:
@@ -274,12 +274,12 @@ class PPOLoss(nn.Module):
         # Flatten logits tensor to shape (batch_size * sequence_length, vocab_size)
         logits = logits.view(-1, logits.size(-1))
         # Shape: (batch_size * sequence_length,)
-        tokens = shift(tokens, ignore_label=bos_id).view(-1)
-        values = shift(values).view(-1)
-        advantages = shift(advantages).view(-1)
-        logprobs = shift(logprobs).view(-1)
-        reference_logprobs = shift(reference_logprobs).view(-1)
-        weights = shift(weights).view(-1)
+        tokens = shift_tensor(tokens, ignore_label=bos_id).view(-1)
+        values = shift_tensor(values).view(-1)
+        advantages = shift_tensor(advantages).view(-1)
+        logprobs = shift_tensor(logprobs).view(-1)
+        reference_logprobs = shift_tensor(reference_logprobs).view(-1)
+        weights = shift_tensor(weights).view(-1)
 
         # Create a Categorical distribution from logits
         dist = torch.distributions.Categorical(logits=logits)
