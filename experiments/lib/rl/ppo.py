@@ -51,8 +51,10 @@ class PPOResult:
     entropy_weight: torch.Tensor = tensor_field()
     entropy_target_weight: torch.Tensor = tensor_field()
     kl_weight: torch.Tensor = tensor_field()
+    reverse_kl_weight: torch.Tensor = tensor_field()
     weighted_entropy_weight: torch.Tensor = tensor_field()
     weighted_kl_weight: torch.Tensor = tensor_field()
+    weighted_reverse_kl_weight: torch.Tensor = tensor_field()
     weighted_ce_weight: torch.Tensor = tensor_field()
     policy_loss: torch.Tensor = tensor_field()
     unclipped_policy_loss: torch.Tensor = tensor_field()
@@ -61,8 +63,10 @@ class PPOResult:
     entropy_bonus: torch.Tensor = tensor_field()
     entropy_target: torch.Tensor = tensor_field()
     kl_divergence: torch.Tensor = tensor_field()
+    reverse_kl_divergence: torch.Tensor = tensor_field()
     weighted_entropy_bonus: torch.Tensor = tensor_field()
     weighted_kl_divergence: torch.Tensor = tensor_field()
+    weighted_reverse_kl_divergence: torch.Tensor = tensor_field()
     weighted_ce_loss: torch.Tensor = tensor_field()
     num_tokens: torch.Tensor = field(default_factory=lambda: torch.tensor(0))
 
@@ -104,9 +108,12 @@ class PPOResult:
             - (self.entropy_weight / self.num_tokens) * self.entropy_bonus
             + (self.entropy_target_weight / self.num_tokens) * self.entropy_target_loss
             + (self.kl_weight / self.num_tokens) * self.kl_divergence
+            + (self.reverse_kl_weight / self.num_tokens) * self.reverse_kl_divergence
             - (self.weighted_entropy_weight / self.num_tokens)
             * self.weighted_entropy_bonus
             + (self.weighted_kl_weight / self.num_tokens) * self.weighted_kl_divergence
+            + (self.weighted_reverse_kl_weight / self.num_tokens)
+            * self.weighted_reverse_kl_divergence
             + (self.weighted_ce_weight / self.num_tokens) * self.weighted_ce_loss
         )
 
@@ -123,8 +130,10 @@ class PPOLoss(nn.Module):
         entropy_target: float = 0.5,
         entropy_target_coef: float = 0.0,
         kl_coef: float = 0.0,
+        reverse_kl_coef: float = 0.0,
         weighted_entropy_coef: float = 0.0,
         weighted_kl_coef: float = 0.0,
+        weighted_reverse_kl_coef: float = 0.0,
         weighted_ce_coef: float = 0.0,
         normalize_values: bool = True,
         normalize_value_predictions: bool = True,
@@ -143,8 +152,10 @@ class PPOLoss(nn.Module):
             entropy_target (float): Target entropy (defaults to 0.5).
             entropy_target_coef (float): Coefficient for the entropy target loss.
             kl_coef (float): Coefficient for KL divergence penalty (defaults to 0.0).
+            reverse_kl_coef (float): Coefficient for reverse KL divergence penalty (defaults to 0.0).
             weighted_entropy_coef (float): Coefficient for the weighted entropy bonus.
             weighted_kl_coef (float): Coefficient for the weighted KL divergence penalty.
+            weighted_reverse_kl_coef (float): Coefficient for the weighted reverse KL divergence penalty.
             weighted_ce_coef (float): Coefficient for the weighted cross entropy loss.
             normalize_values (bool): Whether to normalize values before computing the loss (default True).
             normalize_value_predictions (bool): Whether to normalize value predictions before computing the loss (default True).
@@ -160,8 +171,10 @@ class PPOLoss(nn.Module):
         self.entropy_target = entropy_target
         self.entropy_target_coef = entropy_target_coef
         self.kl_coef = kl_coef
+        self.reverse_kl_coef = reverse_kl_coef
         self.weighted_entropy_coef = weighted_entropy_coef
         self.weighted_kl_coef = weighted_kl_coef
+        self.weighted_reverse_kl_coef = weighted_reverse_kl_coef
         self.weighted_ce_coef = weighted_ce_coef
         self.normalize_values = normalize_values
         self.normalize_value_predictions = normalize_value_predictions
@@ -172,12 +185,12 @@ class PPOLoss(nn.Module):
         *,
         logits: Union[torch.Tensor, list[torch.Tensor]],
         tokens: torch.Tensor,
-        values: Optional[torch.Tensor],
+        values: torch.Tensor,
         advantages: torch.Tensor,
         logprobs: torch.Tensor,
-        reference_logprobs: Optional[torch.Tensor] = None,
-        weights: Optional[torch.Tensor] = None,
-        bos_id: Optional[int] = None,
+        reference_logprobs: torch.Tensor,
+        weights: torch.Tensor,
+        bos_id: int,
     ) -> PPOResult:
         """
         Computes the PPO loss for sequence data, supporting both regular and chunked inputs.
@@ -192,7 +205,7 @@ class PPOLoss(nn.Module):
                 Shape: (batch_size, sequence_length)
                 Token indices sampled under the old policy.
 
-            values (Optional[Tensor]):
+            values (Tensor):
                 Shape: (batch_size, sequence_length)
                 Value estimates for each token.
 
@@ -204,47 +217,31 @@ class PPOLoss(nn.Module):
                 Shape: (batch_size, sequence_length)
                 Log probabilities of the sampled tokens under the old policy.
 
-            reference_logprobs (Optional[Tensor]):
+            reference_logprobs (Tensor):
                 Shape: (batch_size, sequence_length)
                 Log probabilities of the sampled tokens under the reference policy.
 
-            weights (Optional[Tensor]):
+            weights (Tensor):
                 Shape: (batch_size, sequence_length)
-                Optional weights for each token in the sequence.
+                Weights for each token in the sequence.
 
-            bos_id (Optional[int] = None):
-                Index of the beginning of sequence token in the vocabulary. If None, defaults
-                to the first token in `tokens`.
+            bos_id (int):
+                Index of the beginning of sequence token in the vocabulary.
 
         Returns:
             PPOResult: The combined loss results across all chunks.
         """
-        if bos_id is None:
-            bos_id = int(tokens.view(-1)[0].item())
-
         if isinstance(logits, list):
             result = PPOResult().to(logits[0].device)
             num_chunks = len(logits)
             for chunked_args in zip(
                 logits,
                 tokens.chunk(num_chunks, dim=1),
-                (
-                    values.chunk(num_chunks, dim=1)
-                    if values is not None
-                    else [None] * num_chunks
-                ),
+                values.chunk(num_chunks, dim=1),
                 advantages.chunk(num_chunks, dim=1),
                 logprobs.chunk(num_chunks, dim=1),
-                (
-                    reference_logprobs.chunk(num_chunks, dim=1)
-                    if reference_logprobs is not None
-                    else [None] * num_chunks
-                ),
-                (
-                    weights.chunk(num_chunks, dim=1)
-                    if weights is not None
-                    else [None] * num_chunks
-                ),
+                reference_logprobs.chunk(num_chunks, dim=1),
+                weights.chunk(num_chunks, dim=1),
             ):
                 result += self._forward_chunk(*chunked_args, bos_id=bos_id)
             return result
@@ -264,11 +261,11 @@ class PPOLoss(nn.Module):
         self,
         logits: torch.Tensor,
         tokens: torch.Tensor,
-        values: Optional[torch.Tensor],
+        values: torch.Tensor,
         advantages: torch.Tensor,
         logprobs: torch.Tensor,
-        reference_logprobs: Optional[torch.Tensor],
-        weights: Optional[torch.Tensor],
+        reference_logprobs: torch.Tensor,
+        weights: torch.Tensor,
         bos_id: int,
     ) -> PPOResult:
         """
@@ -278,20 +275,13 @@ class PPOLoss(nn.Module):
         logits = logits.view(-1, logits.size(-1))
         # Shape: (batch_size * sequence_length,)
         tokens = shift(tokens, ignore_label=bos_id).view(-1)
-        if values is not None:
-            # Shape: (batch_size * sequence_length,)
-            values = shift(values).view(-1)
-        # Shape: (batch_size * sequence_length,)
+        values = shift(values).view(-1)
         advantages = shift(advantages).view(-1)
-        logprobs = shift(logprobs).view(-1)  # Shape: (batch_size * sequence_length,)
-        if reference_logprobs is not None:
-            # Shape: (batch_size * sequence_length,)
-            reference_logprobs = shift(reference_logprobs).view(-1)
-        if weights is not None:
-            weights = shift(weights).view(-1)  # Shape: (batch_size * sequence_length,)
+        logprobs = shift(logprobs).view(-1)
+        reference_logprobs = shift(reference_logprobs).view(-1)
+        weights = shift(weights).view(-1)
 
         # Create a Categorical distribution from logits
-        # Shape: (batch_size * sequence_length,)
         dist = torch.distributions.Categorical(logits=logits)
 
         # Calculate new log probabilities of the taken actions
@@ -332,26 +322,21 @@ class PPOLoss(nn.Module):
             raise ValueError("KL Divergence Debugging")
 
         # Calculate entropy for each token
-        entropy = dist.entropy()  # Shape: (batch_size * sequence_length,)
+        entropy = dist.entropy()
 
         # Create mask where advantages and logprobs are not NaN
-        # Shape: (batch_size * sequence_length,)
         mask = ~torch.isnan(advantages) & ~torch.isnan(logprobs)
         num_tokens = mask.sum()
 
-        # Apply mask
-        new_logprobs = new_logprobs[mask]  # Shape: (num_tokens,)
-        logprobs = logprobs[mask]  # Shape: (num_tokens,)
-        if values is not None:
-            values = values[mask]  # Shape: (num_tokens,)
-        advantages = advantages[mask]  # Shape: (num_tokens,)
-        entropy = entropy[mask]  # Shape: (num_tokens,)
-        if reference_logprobs is not None:
-            reference_logprobs = reference_logprobs[mask]
-        if weights is not None:
-            weights = weights[mask]
-        else:
-            weights = torch.ones_like(entropy, device=entropy.device)
+        # Apply mask to all tensors
+        # Shape: (num_tokens,)
+        new_logprobs = new_logprobs[mask]
+        logprobs = logprobs[mask]
+        values = values[mask]
+        advantages = advantages[mask]
+        entropy = entropy[mask]
+        reference_logprobs = reference_logprobs[mask]
+        weights = weights[mask]
 
         if self.normalize_advantages:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -378,27 +363,16 @@ class PPOLoss(nn.Module):
             -torch.tanh(log_ratio).mul(advantages).mul(weights).sum()
         )  # Scalar
 
-        if values is not None:
-            # Calculate the value loss
-            # Shape: (num_tokens,)
-            value_preds = logits.gather(-1, tokens.unsqueeze(-1)).squeeze(-1)[mask]
-            if self.normalize_values:
-                values = (values - values.mean()) / (values.std() + 1e-8)
-            if self.normalize_value_predictions:
-                value_preds = (value_preds - value_preds.mean()) / (
-                    value_preds.std() + 1e-8
-                )
-            value_loss = (
-                torch.nn.functional.mse_loss(
-                    value_preds.to(torch.bfloat16),
-                    values.to(torch.bfloat16),
-                    reduction="none",
-                )
-                .mul(weights)
-                .sum()
+        # Calculate the value loss
+        # Shape: (num_tokens,)
+        value_preds = logits.gather(-1, tokens.unsqueeze(-1)).squeeze(-1)[mask]
+        if self.normalize_values:
+            values = (values - values.mean()) / (values.std() + 1e-8)
+        if self.normalize_value_predictions:
+            value_preds = (value_preds - value_preds.mean()) / (
+                value_preds.std() + 1e-8
             )
-        else:
-            value_loss = torch.tensor(0.0, device=logits.device)
+        value_loss = (value_preds - values).pow(2).mul(weights).sum()
 
         # Entropy bonus
         entropy_bonus = entropy.mul(weights)
@@ -414,8 +388,24 @@ class PPOLoss(nn.Module):
         ).mul(
             weights
         )  # Shape: (num_tokens,)
+
         weighted_kl_divergence = kl_divergence.mul(-advantages).sum()  # Scalar
         kl_divergence = kl_divergence.sum()  # Scalar
+
+        # Calculate reverse KL divergence between the old and new policies
+        reverse_kl_divergence = torch.nn.functional.kl_div(
+            reference_logprobs if reference_logprobs is not None else logprobs,
+            new_logprobs,
+            reduction="none",
+            log_target=True,
+        ).mul(
+            weights
+        )  # Shape: (num_tokens,)
+
+        weighted_reverse_kl_divergence = reverse_kl_divergence.mul(
+            -advantages
+        ).sum()  # Scalar
+        reverse_kl_divergence = reverse_kl_divergence.sum()  # Scalar
 
         # Calculate cross entropy loss using log probabilities, weighted by advantages
         weighted_ce_loss = -new_logprobs.mul(advantages).mul(weights).sum()  # Scalar
@@ -428,8 +418,10 @@ class PPOLoss(nn.Module):
             entropy_weight=self.entropy_coef * num_tokens,
             entropy_target_weight=self.entropy_target_coef * num_tokens,
             kl_weight=self.kl_coef * num_tokens,
+            reverse_kl_weight=self.reverse_kl_coef * num_tokens,
             weighted_entropy_weight=self.weighted_entropy_coef * num_tokens,
             weighted_kl_weight=self.weighted_kl_coef * num_tokens,
+            weighted_reverse_kl_weight=self.weighted_reverse_kl_coef * num_tokens,
             weighted_ce_weight=self.weighted_ce_coef * num_tokens,
             policy_loss=policy_loss,
             unclipped_policy_loss=unclipped_policy_loss,
@@ -438,8 +430,10 @@ class PPOLoss(nn.Module):
             entropy_bonus=entropy_bonus,
             entropy_target=self.entropy_target * num_tokens,
             kl_divergence=kl_divergence,
+            reverse_kl_divergence=reverse_kl_divergence,
             weighted_entropy_bonus=weighted_entropy_bonus,
             weighted_kl_divergence=weighted_kl_divergence,
+            weighted_reverse_kl_divergence=weighted_reverse_kl_divergence,
             weighted_ce_loss=weighted_ce_loss,
             num_tokens=num_tokens,
         )
