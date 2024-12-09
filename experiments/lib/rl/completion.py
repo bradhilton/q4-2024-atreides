@@ -547,48 +547,76 @@ class Completion:
             self._cached_sample_weights[(model, power)] = weight
         return weight
 
-    def can_split(self, by: SplitMethod, separators: Optional[set[str]] = None) -> bool:
-        positive_weights = 0
-        for weight in self._split_weights(by, separators=separators):
-            if weight > 0:
-                positive_weights += 1
-            if positive_weights > 1:
-                return True
-        return False
+    def max_splits(
+        self,
+        by: SplitMethod,
+        separators: Optional[set[str]] = None,
+    ) -> int:
+        return max(
+            sum(
+                1
+                for weight in self._split_weights(by, separators=separators)
+                if weight > 0
+            )
+            - 1,
+            0,
+        )
 
     def split_weight(
         self, by: SplitMethod, separators: Optional[set[str]] = None
     ) -> float:
         return sum(self._split_weights(by, separators=separators))
 
-    def split(self, by: SplitMethod, separators: Optional[set[str]] = None) -> bool:
+    def split(
+        self,
+        by: SplitMethod,
+        at: Iterable[float] = (0.5,),
+        separators: Optional[set[str]] = None,
+        weights: Optional[Iterable[float]] = None,
+    ) -> Iterable["Completion"]:
         """
-        Creates a new child completion and splits the completable contents between the parent (this) and the child.
+        Splits this completion into two or more completions at the specified split points.
 
         NOTE: Currently only supports splitting `Choice`s with `logprobs.content`.
 
         Args:
             by (Literal["count", "prob", "logprob"]): The weighting method for splitting the completion.
+            at (Iterable[float]): The split points as a fraction of the total weight in the range (0, 1).
             separators (Optional[set[str]]): An optional set of separators to group tokens when splitting.
+            weights (Optional[list[float]]): An optional list of weights for each token logprob. Must be the same length as the number of tokens.
 
-        Returns:
-            bool: Whether the completion was successfully split.
+        Yields:
+            Completion: The original completion followed by split completions.
+            May yield fewer completions than split points if some splits aren't possible.
+
+        Raises:
+            AssertionError: If weights length doesn't match `num_token_logprobs()`.
         """
-        split_weights = list(self._split_weights(by, separators=separators))
+        yield self
+        split_points = sorted(at)
+        if not split_points:
+            return
+        split_point = split_points[0]
+        split_points = [
+            (point - split_point) / (1 - split_point) for point in split_points[1:]
+        ]
+        weights = list(weights or self._split_weights(by, separators=separators))
         assert (
-            separators is None or len(split_weights) == self.num_token_logprobs()
+            separators is None or len(weights) == self.num_token_logprobs()
         ), "Number of weights does not match number of tokens."
-        if len(split_weights) < 2:
-            return False
-        cumsum = np.cumsum(split_weights)
-        np.isclose(cumsum[-1], self.split_weight(by))
-        assert separators is None or np.isclose(
-            cumsum[-1], self.split_weight(by)
-        ), "Grouped weights do not sum to total weight."
-        split = np.searchsorted(cumsum, max(cumsum[-1] / 2, cumsum[0]), side="right")
-        assert split != 0, "Cannot split at start of completion."
-        assert split != len(split_weights), "Cannot split at end of completion."
-        assert split_weights[split] != 0, "Split point has zero weight."
+        if len(weights) < 2:
+            return
+        cumsum = np.cumsum(weights)
+        split = np.searchsorted(
+            cumsum, max(cumsum[-1] * split_point, cumsum[0]), side="right"
+        )
+        assert weights[split] != 0, "Split point has zero weight."
+        if split == 0:
+            # Cannot split at start of completion, so yield the remaining splits
+            yield from self.split(by=by, at=split_points, separators=separators)
+        elif split == len(weights):
+            # Cannot split at end of completion, so return early
+            return
         i = 0
         for j, choice in enumerate(self.messages):
             if (
@@ -639,8 +667,8 @@ class Completion:
                 self.children = {child}
                 self._cached_tokens = None
                 self._cached_tokens_and_mask = None
-                return True
-        return False
+                yield from child.split(by=by, at=split_points, weights=weights[split:])
+                return
 
     def _split_weights(
         self, by: SplitMethod, separators: Optional[set[str]]

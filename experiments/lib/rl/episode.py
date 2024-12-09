@@ -156,13 +156,13 @@ class Episode:
                 (
                     c
                     for c in leaf.ancestors(including_self=True)
-                    if c.can_split(by=split_method, separators=split_separators)
+                    if c.max_splits(by=split_method, separators=split_separators) > 0
                 ),
                 key=lambda c: abs(c.advantage()) * c.split_weight(by=split_method),
             )
-            assert parent.split(
-                by=split_method, separators=split_separators
-            ), "Unable to split completion"
+            assert list(parent.split(by=split_method, separators=split_separators))[
+                :-1
+            ], "Unable to split completion"
             return parent
         except BaseException as e:
             print(type(e), e)
@@ -183,7 +183,7 @@ class Episode:
                 for completion in self.completion.leaves(model=model)
                 if not where_leaf_or_ancestor_is_splittable
                 or any(
-                    c.can_split(split_method, separators=split_separators)
+                    c.max_splits(split_method, separators=split_separators) > 0
                     for c in completion.ancestors(including_self=True)
                 )
             ),
@@ -245,22 +245,22 @@ class Episode:
             return [self.completion]
         if not split:
             return []
-        parents = sorted(
+        completions = sorted(
             (
                 c
                 for c in self.completion.descendants(model=model)
-                if c.can_split(by=split_method, separators=split_separators)
+                if c.max_splits(by=split_method, separators=split_separators) > 0
             ),
             key=lambda c: abs(c.advantage(cache=True, model=model))
             * (c.split_weight(by=split_method) / c.num_token_logprobs())
             * c.sample_weight(cache=True, model=model, power=sample_probability_power),
             reverse=True,
         )[:max_parallel_splits]
-        for parent in parents:
-            assert parent.split(
-                by=split_method, separators=split_separators
-            ), "Unable to split completion"
-        return parents
+        for parent in completions:
+            assert list(parent.split(by=split_method, separators=split_separators))[
+                :-1
+            ], "Unable to split completion"
+        return completions
 
     async def _sample_completions(
         self,
