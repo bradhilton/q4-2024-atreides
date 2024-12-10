@@ -1,6 +1,8 @@
+import asyncio
 import black
 from collections import deque
 import time
+from openai import AsyncOpenAI
 from openai.types.chat.chat_completion_token_logprob import ChatCompletionTokenLogprob
 import torch
 from typing import Any, Callable, Optional, ParamSpec, Sequence, TypeVar, Union
@@ -21,6 +23,23 @@ def black_print(
     print(
         black.format_str(str(value), mode=black.Mode()).strip(),
     )
+
+
+def get_semaphore(client: AsyncOpenAI, default_value: int = 100) -> asyncio.Semaphore:
+    if hasattr(client, "_semaphore"):
+        return getattr(client, "_semaphore")
+    transport = client._client._transport
+    semaphore = asyncio.Semaphore(
+        value=(
+            getattr(
+                getattr(transport, "_pool"), "_max_keepalive_connections", default_value
+            )
+            if hasattr(transport, "_pool")
+            else default_value
+        )
+    )
+    setattr(client, "_semaphore", semaphore)
+    return semaphore
 
 
 def get_token(token_logprob: ChatCompletionTokenLogprob) -> str:
