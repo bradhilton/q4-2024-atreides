@@ -5,7 +5,8 @@
 .vscode
 __pycache__/
 experiments/.neptune
-experiments/data
+experiments/data/*
+!experiments/data/examples.json
 experiments/logs
 experiments/models
 experiments/runs
