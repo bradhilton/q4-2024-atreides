@@ -147,12 +147,9 @@ class Trainer:
         reference_vllm_config: Optional[vLLMConfig] = None,
         train_episodes: Episodes,
         episodes_per_iteration: Optional[int] = None,
-        patience_per_val_sample: float = 5.0,
-        patience_per_test_sample: float = 5.0,
         max_mask_sequence_batch_size: Optional[int] = None,
-        val_episodes: Optional[Episodes] = None,
-        val_samples_per_episode: int = 1,
         test_episodes: Optional[Episodes] = None,
+        test_patience: float = 5.0,
         test_samples_per_episode: int = 1,
         torchrun_kwargs: Optional[dict[str, Any]] = None,
         tune_episode_sample_fraction: float = 1.0,
@@ -162,6 +159,9 @@ class Trainer:
         tune_run: bool = True,
         tune_run_env: Optional[dict[str, str]] = None,
         tune_sequence_length: int = 8192,
+        val_episodes: Optional[Episodes] = None,
+        val_patience: float = 5.0,
+        val_samples_per_episode: int = 1,
         vllm_config: Optional[vLLMConfig] = None,
         wandb_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
@@ -204,11 +204,13 @@ class Trainer:
         self.episodes_per_iteration: Optional[int] = (
             episodes_per_iteration or getattr(train_episodes, "__len__", lambda: None)()
         )
-        self.patience_per_val_sample = patience_per_val_sample
-        self.patience_per_test_sample = patience_per_test_sample
         self.max_mask_sequence_batch_size = max_mask_sequence_batch_size or max(
             32768 // tune_sequence_length, 1
         )
+        self.eval_patience = {
+            "val": val_patience,
+            "test": test_patience,
+        }
         self.eval_episodes = {
             "val": val_episodes,
             "test": test_episodes,
@@ -382,22 +384,15 @@ class Trainer:
         pbar.total = len(episodes)
         pbar.refresh()
         self.eval_episodes[split] = episodes
-        patience_per_sample = (
-            self.patience_per_val_sample
-            if split == "val"
-            else self.patience_per_test_sample
-        )
         for future in asyncio.as_completed(tasks):
-            remaining_samples = self.eval_samples_per_episode[split] * (
-                pbar.total - pbar.n
-            )
-            patience = patience_per_sample * remaining_samples
+            remaining_episodes = pbar.total - pbar.n
+            patience = self.eval_patience[split] * remaining_episodes
             try:
                 await asyncio.wait_for(future, timeout=patience)
             except asyncio.TimeoutError:
                 if verbosity > 0:
                     print(
-                        f"Early stopping {split} evaluation due to expired patience ({remaining_samples} remaining samples x {patience_per_sample} patience per sample = {patience} seconds)"
+                        f"Early stopping {split} evaluation due to expired patience ({remaining_episodes} remaining episodes x {self.eval_patience[split]} patience per episode = {patience} seconds)"
                     )
                 for task in tasks:
                     task.cancel()
