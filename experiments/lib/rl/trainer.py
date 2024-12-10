@@ -151,6 +151,7 @@ class Trainer:
         test_episodes: Optional[Episodes] = None,
         test_patience: float = 5.0,
         test_samples_per_episode: int = 1,
+        test_sampling_kwargs: Optional[SamplingKwargs] = None,
         torchrun_kwargs: Optional[dict[str, Any]] = None,
         tune_episode_sample_fraction: float = 1.0,
         tune_model: Callable[[], TransformerDecoder],
@@ -162,6 +163,7 @@ class Trainer:
         val_episodes: Optional[Episodes] = None,
         val_patience: float = 5.0,
         val_samples_per_episode: int = 1,
+        val_sampling_kwargs: Optional[SamplingKwargs] = None,
         vllm_config: Optional[vLLMConfig] = None,
         wandb_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
@@ -207,10 +209,7 @@ class Trainer:
         self.max_mask_sequence_batch_size = max_mask_sequence_batch_size or max(
             32768 // tune_sequence_length, 1
         )
-        self.eval_patience = {
-            "val": val_patience,
-            "test": test_patience,
-        }
+        self.eval_entropies: dict[str, dict[str, float]] = {"val": {}, "test": {}}
         self.eval_episodes = {
             "val": val_episodes,
             "test": test_episodes,
@@ -219,12 +218,19 @@ class Trainer:
             "val": [],
             "test": [],
         }
+        self.eval_patience = {
+            "val": val_patience,
+            "test": test_patience,
+        }
         self.eval_samples_per_episode = {
             "val": val_samples_per_episode,
             "test": test_samples_per_episode,
         }
+        self.eval_sampling_kwargs = {
+            "val": val_sampling_kwargs,
+            "test": test_sampling_kwargs,
+        }
         self.eval_scores: dict[str, dict[str, float]] = {"val": {}, "test": {}}
-        self.eval_entropies: dict[str, dict[str, float]] = {"val": {}, "test": {}}
         self.explore_results: list[ExploreResult] = []
         self.torchrun_kwargs = torchrun_kwargs or {}
         self.tune_episode_sample_fraction = tune_episode_sample_fraction
@@ -357,7 +363,7 @@ class Trainer:
                 avg=get_score(), entropy=get_entropy(), exceptions=len(exceptions)
             )
 
-        sampling_kwargs = (self.explore_options.sampling_kwargs or {}).copy()
+        sampling_kwargs = (self.eval_sampling_kwargs[split] or {}).copy()
         sampling_kwargs["top_logprobs"] = 20
 
         async for episode in iter(
