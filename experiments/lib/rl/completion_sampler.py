@@ -1,3 +1,4 @@
+from aioitertools.helpers import maybe_await
 import asyncio
 import bisect
 from collections import Counter
@@ -8,6 +9,7 @@ from openai.types.chat.completion_create_params import CompletionCreateParamsBas
 from types import TracebackType
 from typing import (
     Any,
+    Awaitable,
     Callable,
     cast,
     Never,
@@ -142,8 +144,15 @@ class CompletionSampler:
             list[ChatCompletionMessageParam],
             Callable[[], list[ChatCompletionMessageParam]],
         ] = [],
-        get_recovery_pattern: Optional[Callable[[], Optional[str]]] = None,
+        instructions: Union[
+            Optional[str],
+            Callable[[Completion], Union[Optional[str], Awaitable[Optional[str]]]],
+        ] = None,
         priority: float = 0.0,
+        recovery_pattern: Union[
+            Optional[str],
+            Callable[[Completion], Union[Optional[str], Awaitable[Optional[str]]]],
+        ] = None,
         strip: set[str] = set(),
         **kwargs: Unpack[SamplingKwargs],
     ) -> list[Completion]:
@@ -165,7 +174,7 @@ class CompletionSampler:
                             parent,
                             continue_last_message_if_assistant=continue_last_message_if_assistant,
                             examples=examples,
-                            get_recovery_pattern=get_recovery_pattern,
+                            recovery_pattern=recovery_pattern,
                             priority=priority,
                             strip=strip,
                             n=count,
@@ -176,9 +185,47 @@ class CompletionSampler:
                 )
                 for completion in completions
             ]
-        if get_recovery_pattern and parent.advantage(cache=True) < 0:
+        if callable(instructions):
+            all_instructions = Counter(
+                await asyncio.gather(
+                    *(
+                        maybe_await(instructions(parent))
+                        for _ in range(kwargs.pop("n", 1) or 1)
+                    )
+                )
+            )
+            return [
+                completion
+                for completions in await asyncio.gather(
+                    *(
+                        self.sample_completions(
+                            parent,
+                            continue_last_message_if_assistant=continue_last_message_if_assistant,
+                            examples=examples,
+                            instructions=instructions,
+                            recovery_pattern=recovery_pattern,
+                            priority=priority,
+                            strip=strip,
+                            n=count,
+                            **kwargs,  # type: ignore
+                        )
+                        for instructions, count in all_instructions.items()
+                    )
+                )
+                for completion in completions
+            ]
+        if recovery_pattern and parent.advantage(cache=True) < 0:
             patterns = Counter(
-                get_recovery_pattern() for _ in range(kwargs.get("n", 1) or 1)
+                await asyncio.gather(
+                    *(
+                        maybe_await(
+                            recovery_pattern(parent)
+                            if callable(recovery_pattern)
+                            else recovery_pattern
+                        )
+                        for _ in range(kwargs.get("n", 1) or 1)
+                    )
+                )
             )
             if None not in patterns or len(patterns) > 1:
                 _ = kwargs.pop("n", None)
@@ -205,6 +252,19 @@ class CompletionSampler:
                     for completion in completions
                 ]
         messages = examples + parent.all_message_params()
+        if instructions:
+            messages.insert(
+                (
+                    -1
+                    if continue_last_message_if_assistant
+                    and messages[-1]["role"] == "assistant"
+                    else len(messages)
+                ),
+                {
+                    "role": "system",
+                    "content": instructions,
+                },
+            )
         untyped_kwargs: dict = {
             "messages": messages,
             "logprobs": True,

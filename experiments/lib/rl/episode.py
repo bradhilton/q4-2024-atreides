@@ -210,7 +210,7 @@ class Episode:
         completion_sampler: CompletionSampler,
         num_parents: int,
         branch_factor: int,
-        get_recovery_pattern: Optional[Callable[[], Optional[str]]] = None,
+        get_recovery_pattern: Optional[Callable[[Completion], Optional[str]]] = None,
         max_splits_per_completion: int = 1,
         priority: Optional[int] = None,
         sample_probability_power: float = 1.0,
@@ -267,7 +267,7 @@ class Episode:
                             else branch_factor
                         ),
                         fork_decay=1.0,
-                        get_recovery_pattern=get_recovery_pattern,
+                        recovery_pattern=get_recovery_pattern,
                         split_separators=split_separators or set(),
                         priority=priority,
                         sampling_kwargs=sampling_kwargs or {},
@@ -395,7 +395,7 @@ class Episode:
         completion_sampler: CompletionSampler,
         branch_factor: int,
         fork_decay: float,
-        get_recovery_pattern: Optional[Callable[[], Optional[str]]],
+        recovery_pattern: Optional[Callable[[Completion], Optional[str]]],
         split_separators: set[str],
         sampling_kwargs: SamplingKwargs,
         priority: Optional[int] = None,
@@ -407,8 +407,8 @@ class Episode:
         completions = await completion_sampler.sample_completions(
             parent,
             examples=self.examples,
-            get_recovery_pattern=get_recovery_pattern,
             priority=priority or 0,
+            recovery_pattern=recovery_pattern,
             strip=split_separators,
             **{**sampling_kwargs, "n": n},
         )

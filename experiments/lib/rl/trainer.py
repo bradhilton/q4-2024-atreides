@@ -96,7 +96,7 @@ class ExploreOptions:
     branch_factor: int
     max_split_points: Optional[int] = None
     patience: float = 1.0
-    recovery_pattern: Optional[Union[str, Callable[[], str]]] = None
+    recovery_pattern: Optional[Union[str, Callable[[Completion], str]]] = None
     sample_probability_power: Optional[float] = None
     sampling_kwargs: Optional[SamplingKwargs] = None
     split_method: SplitMethod = "count"
@@ -104,10 +104,10 @@ class ExploreOptions:
     split_separators: Optional[set[str]] = None
 
     @property
-    def get_recovery_pattern(self) -> Optional[Callable[[], str]]:
+    def get_recovery_pattern(self) -> Optional[Callable[[Completion], str]]:
         recovery_pattern = self.recovery_pattern
         if isinstance(recovery_pattern, str):
-            return lambda: recovery_pattern
+            return lambda _: recovery_pattern
         else:
             return recovery_pattern
 
