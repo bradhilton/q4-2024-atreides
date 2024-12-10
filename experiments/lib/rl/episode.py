@@ -14,6 +14,7 @@ from typing import (
     Literal,
     Optional,
     Protocol,
+    Union,
     Unpack,
 )
 
@@ -82,12 +83,17 @@ class Episode:
         on_sample: Callable[
             [list[EpisodeCompletion]], None | Coroutine[None, None, None]
         ],
+        examples: Union[
+            list[ChatCompletionMessageParam],
+            Callable[[], list[ChatCompletionMessageParam]],
+        ] = [],
         get_easier_episode: Optional[tuple[float, SampleEpisode]] = None,
         get_similar_episode: Optional[SampleEpisode] = None,
         get_harder_episode: Optional[tuple[float, SampleEpisode]] = None,
     ) -> None:
         self.completion = Completion(messages=messages)  # type: ignore
         self.on_sample = on_sample
+        self.examples = examples
         self.min_value = (get_easier_episode or [None])[0]
         self.max_value = (get_harder_episode or [None])[0]
         self.get_easier_episode = (get_easier_episode or [None, None])[1]
@@ -400,9 +406,10 @@ class Episode:
             return False
         completions = await completion_sampler.sample_completions(
             parent,
-            strip=split_separators,
-            priority=priority or 0,
+            examples=self.examples,
             get_recovery_pattern=get_recovery_pattern,
+            priority=priority or 0,
+            strip=split_separators,
             **{**sampling_kwargs, "n": n},
         )
         if num_children:

@@ -3,6 +3,7 @@ import bisect
 from collections import Counter
 from openai import AsyncOpenAI
 from openai.types.chat.chat_completion import ChatCompletion, Choice
+from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
 from openai.types.chat.completion_create_params import CompletionCreateParamsBase
 from types import TracebackType
 from typing import (
@@ -12,6 +13,7 @@ from typing import (
     Never,
     Optional,
     Protocol,
+    Union,
     Unpack,
 )
 
@@ -134,12 +136,46 @@ class CompletionSampler:
     async def sample_completions(
         self,
         parent: Completion,
+        *,
         continue_last_message_if_assistant: bool = True,
-        strip: set[str] = set(),
-        priority: float = 0.0,
+        examples: Union[
+            list[ChatCompletionMessageParam],
+            Callable[[], list[ChatCompletionMessageParam]],
+        ] = [],
         get_recovery_pattern: Optional[Callable[[], Optional[str]]] = None,
+        priority: float = 0.0,
+        strip: set[str] = set(),
         **kwargs: Unpack[SamplingKwargs],
     ) -> list[Completion]:
+        if callable(examples):
+            example_sets: list[tuple[list[ChatCompletionMessageParam], int]] = []
+            for _ in range(kwargs.pop("n", 1) or 1):
+                some_examples = examples()
+                for i, (other_examples, count) in enumerate(example_sets.copy()):
+                    if some_examples == other_examples:
+                        example_sets[i] = (other_examples, count + 1)
+                        break
+                else:
+                    example_sets.append((some_examples, 1))
+            return [
+                completion
+                for completions in await asyncio.gather(
+                    *(
+                        self.sample_completions(
+                            parent,
+                            continue_last_message_if_assistant=continue_last_message_if_assistant,
+                            examples=examples,
+                            get_recovery_pattern=get_recovery_pattern,
+                            priority=priority,
+                            strip=strip,
+                            n=count,
+                            **kwargs,  # type: ignore
+                        )
+                        for examples, count in example_sets
+                    )
+                )
+                for completion in completions
+            ]
         if get_recovery_pattern and parent.advantage(cache=True) < 0:
             patterns = Counter(
                 get_recovery_pattern() for _ in range(kwargs.get("n", 1) or 1)
@@ -153,9 +189,9 @@ class CompletionSampler:
                         *(
                             self.sample_completions(
                                 parent,
-                                continue_last_message_if_assistant,
-                                strip,
-                                priority,
+                                continue_last_message_if_assistant=continue_last_message_if_assistant,
+                                priority=priority,
+                                strip=strip,
                                 n=count,
                                 extra_body={
                                     **extra_body,
@@ -168,7 +204,7 @@ class CompletionSampler:
                     )
                     for completion in completions
                 ]
-        messages = parent.all_message_params()
+        messages = examples + parent.all_message_params()
         untyped_kwargs: dict = {
             "messages": messages,
             "logprobs": True,
@@ -227,9 +263,10 @@ class CompletionSampler:
                     *(
                         self.sample_completions(
                             completion,
-                            continue_last_message_if_assistant,
-                            strip,
-                            priority,
+                            continue_last_message_if_assistant=continue_last_message_if_assistant,
+                            examples=examples,
+                            strip=strip,
+                            priority=priority,
                             **kwargs,
                         )
                         for completion in completions
