@@ -232,10 +232,14 @@ class Trainer:
         }
         self.eval_scores: dict[str, dict[str, float]] = {"val": {}, "test": {}}
         self.explore_results: list[ExploreResult] = []
-        self.torchrun_kwargs = torchrun_kwargs or {
-            "nnodes": 1,
-            "nproc_per_node": torch.cuda.device_count(),
-        }
+        self.torchrun_kwargs = torchrun_kwargs or (
+            {
+                "nnodes": 1,
+                "nproc_per_node": torch.cuda.device_count(),
+            }
+            if torch.cuda.device_count() > 1
+            else {}
+        )
         self.tune_episode_sample_fraction = tune_episode_sample_fraction
         self.tune_model = tune_model
         self.tune_model_type = tune_model_type

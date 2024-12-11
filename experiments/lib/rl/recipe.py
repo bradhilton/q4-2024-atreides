@@ -483,6 +483,12 @@ class TuneRecipe(FTRecipeInterface):
             ac_option=cfg.get("ac_option", None),
         )
 
+        if self.reference_model_state_dict:
+            # pin reference model state
+            for value in self.reference_model_state_dict.values():
+                if not isinstance(value, torch.distributed._tensor.DTensor):  # type: ignore
+                    value.pin_memory()
+
         self._optimizer = self._setup_optimizer(
             cfg_optimizer=cfg.optimizer,
             optimizer_in_bwd=self._optimizer_in_bwd,
@@ -948,6 +954,7 @@ class TuneRecipe(FTRecipeInterface):
         """
         # clean up before training begins
         training.cleanup_before_training()
+        torch.autograd.set_detect_anomaly(True)
 
         world_size, rank = training.get_world_size_and_rank()
 
@@ -996,18 +1003,34 @@ class TuneRecipe(FTRecipeInterface):
                     # Save current weights and load reference weights
                     model_state_dict = self._swap_state(self.reference_model_state_dict)
 
-                    with self.activations_handling_ctx:
+                    # Run reference model forward pass without affecting autograd
+                    with torch.no_grad(), self.activations_handling_ctx:
                         logits = self._model(
                             tokens=batch["tokens"],
                             mask=batch["mask"],
                             input_pos=batch["input_pos"],
                         )
-                        # Calculate reference logprobs
-                        reference_logprobs: torch.Tensor = (
-                            torch.distributions.Categorical(logits=logits).log_prob(
+                        if isinstance(logits, list):
+                            reference_logprobs = torch.cat(
+                                [
+                                    torch.distributions.Categorical(
+                                        logits=logits_chunk
+                                    ).log_prob(
+                                        shift_tensor(tokens, ignore_label=bos_id)
+                                    )
+                                    for logits_chunk, tokens in zip(
+                                        logits,
+                                        batch["tokens"].chunk(len(logits), dim=1),
+                                    )
+                                ],
+                                dim=-1,
+                            )
+                        else:
+                            reference_logprobs = torch.distributions.Categorical(
+                                logits=logits
+                            ).log_prob(
                                 shift_tensor(batch["tokens"], ignore_label=bos_id)
                             )
-                        )
                         del logits
 
                     # Restore original weights
@@ -1191,10 +1214,15 @@ class TuneRecipe(FTRecipeInterface):
             Original model state dict (moved to CPU)
         """
         # Save current model state and move to CPU
-        current_state = {k: v.to("cpu") for k, v in self._model.state_dict().items()}
+        current_state = {
+            k: v.to("cpu", non_blocking=True)
+            for k, v in self._model.state_dict().items()
+        }
 
         # Move input state to device and load
-        device_state = {k: v.to(self._device) for k, v in state_dict.items()}
+        device_state = {
+            k: v.to(self._device, non_blocking=True) for k, v in state_dict.items()
+        }
         self._model.load_state_dict(device_state, assign=assign)
 
         return current_state
