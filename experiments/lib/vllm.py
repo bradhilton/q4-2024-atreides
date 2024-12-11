@@ -169,12 +169,13 @@ async def start_vllm(
     client = AsyncOpenAI(
         api_key="default",
         base_url=f"http://{kwargs.get('host', '0.0.0.0')}:{kwargs["port"]}/v1",
+        max_retries=12,
         http_client=DefaultAsyncHttpxClient(
             limits=httpx.Limits(
                 max_connections=max_concurrent_requests * 4,
                 max_keepalive_connections=max_concurrent_requests,
             ),
-            timeout=httpx.Timeout(timeout=600, connect=60.0),
+            timeout=httpx.Timeout(timeout=600, connect=5.0),
         ),
     )
     start = asyncio.get_event_loop().time()

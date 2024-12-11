@@ -1120,7 +1120,7 @@ class TuneRecipe(FTRecipeInterface):
                     pbar.set_postfix(
                         policy=f"{policy_to_log:.4f}",
                         unclipped_policy=f"{unclipped_policy_to_log:.4f}",
-                        tanh_log_policy_to_log=f"{tanh_log_policy_to_log:.4f}",
+                        tanh_log_policy=f"{tanh_log_policy_to_log:.4f}",
                         value=f"{value_to_log:.4f}",
                         entropy=f"{entropy_to_log:.4f}",
                         entropy_target=f"{entropy_target_to_log:.4f}",
