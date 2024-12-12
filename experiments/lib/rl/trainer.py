@@ -383,13 +383,16 @@ class Trainer:
                 else:
                     raise episode
             episodes.append(episode)
+            samples = self.eval_samples_per_episode[split]
             task = asyncio.create_task(
                 episode.sample_completions_v2(
                     completion_sampler,
                     num_parents=1,
-                    branch_factor=self.eval_samples_per_episode[split],
+                    branch_factor=samples,
                     sampling_kwargs=sampling_kwargs,
                 )
+                if episode.num_samples(model=self.model) < samples
+                else maybe_await(True)
             )
             task.add_done_callback(done_callback)
             tasks.append(task)
