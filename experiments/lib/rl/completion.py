@@ -231,6 +231,18 @@ class Completion:
     def max_depth(self, model: Optional[str] = None) -> int:
         return max(self.depths(model=model), default=0)
 
+    def absent_stop_tokens(self) -> int:
+        return sum(
+            1
+            for message in self.messages
+            if not isinstance(message, dict) and message.finish_reason == "length"
+        )
+
+    def all_absent_stop_tokens(self) -> int:
+        return self.absent_stop_tokens() + (
+            self.parent.all_absent_stop_tokens() if self.parent else 0
+        )
+
     def entropy(self, cache: bool = False) -> float:
         """Calculate the average entropy per token.
 

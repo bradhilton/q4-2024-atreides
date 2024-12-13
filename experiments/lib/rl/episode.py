@@ -32,6 +32,14 @@ class EpisodeCompletion:
     _priority: Optional[int]
 
     @property
+    def absent_stop_tokens(self) -> int:
+        return self._completion.absent_stop_tokens()
+
+    @property
+    def all_absent_stop_tokens(self) -> int:
+        return self._completion.all_absent_stop_tokens()
+
+    @property
     def last_assistant_message(self) -> ChatCompletionAssistantMessageParam:
         return next(
             message
@@ -59,6 +67,9 @@ class EpisodeCompletion:
         messages: list[ChatCompletionMessageParam],
         **sampling_kwargs: Unpack[SamplingKwargs],  # type: ignore
     ) -> "EpisodeCompletion":
+        for message in self._completion.messages:
+            if not isinstance(message, dict):
+                message.finish_reason
         completions = await self._sampler.sample_completions(
             Completion(parent=self._completion, messages=messages),
             priority=self._priority or 0,

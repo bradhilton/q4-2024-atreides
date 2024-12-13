@@ -260,9 +260,10 @@ class Trainer:
         self._wandb_kwargs = wandb_kwargs.copy() if wandb_kwargs else {}
         if self._wandb_kwargs:
             self._wandb_kwargs["resume"] = "allow"
-            self._wandb_kwargs["reinit"] = True
         self._wandb_run = (
-            wandb.init(**self._wandb_kwargs) if self._wandb_kwargs else None
+            wandb.run or wandb.init(**self._wandb_kwargs)
+            if self._wandb_kwargs
+            else None
         )
 
     @property
