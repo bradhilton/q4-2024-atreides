@@ -663,13 +663,13 @@ class Completion:
         split = np.searchsorted(
             cumsum, max(cumsum[-1] * split_point, cumsum[0]), side="right"
         )
-        assert weights[split] != 0, "Split point has zero weight."
         if split == 0:
             # Cannot split at start of completion, so yield the remaining splits
             yield from self.split(by=by, at=split_points, separators=separators)
         elif split == len(weights):
             # Cannot split at end of completion, so return early
             return
+        assert weights[split] != 0, "Split point has zero weight."
         i = 0
         for j, choice in enumerate(self.messages):
             if (
