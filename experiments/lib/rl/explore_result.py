@@ -13,7 +13,7 @@ from .completion import Completion
 from .episode import Episode
 from .pack import DiskPackedTensors, get_mask, PackedTensors, packed_tensors_from_dir
 from ..tokenizer import Tokenizer
-from ..utils import get_token, truncate_pad
+from ..utils import truncate_pad
 
 
 @dataclass
@@ -228,39 +228,6 @@ class ExploreResult:
         tokenizer: Tokenizer,
     ) -> dict[str, torch.Tensor]:
         tokens, mask = completion.tokens_and_mask(tokenizer, cache=True)
-        # # replacement_token, replacement_token_id = get_replacement_token(tokens, tokenizer)
-        # # Hard coding this for now
-        # replacement_token, replacement_token_id = (
-        #     "<|reserved_special_token_250|>",
-        #     128255,
-        # )
-        # replaced_tokens = completion.tokens(
-        #     tokenizer, replacement_token=replacement_token
-        # )
-        # mask = replaced_tokens == replacement_token_id
-        # if tokens.shape != replaced_tokens.shape:
-        #     tokens = replaced_tokens.clone()
-        #     _tokens = torch.tensor(
-        #         tokenizer.llm.get_tokenizer()(
-        #             [
-        #                 get_token(token_logprob)
-        #                 for token_logprobs in completion._token_logprob_sequences()
-        #                 for token_logprob in token_logprobs
-        #             ],
-        #             add_special_tokens=False,
-        #             is_split_into_words=True,  # type: ignore
-        #         )["input_ids"]
-        #     )
-        #     try:
-        #         tokens[mask] = _tokens
-        #     except RuntimeError as exception:
-        #         print(type(exception), exception)
-        #         tokens[mask] = truncate_pad(
-        #             _tokens,
-        #             [mask.sum().item()],  # type: ignore
-        #             mode="constant",
-        #             value=tokenizer.get_pad_token_id() or 0,
-        #         )
         values = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
         value = completion.value(cache=True, model=self.model)
         values[mask] = torch.tensor([value for _ in range(mask.sum())])
