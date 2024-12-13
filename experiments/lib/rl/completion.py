@@ -82,8 +82,8 @@ class Completion:
         self.reference_logprobs: Optional[torch.Tensor] = None
         self._cached_values: dict[tuple[Optional[str], Optional[bool]], float] = {}
         self._cached_sample_weights: dict[tuple[Optional[str], float], float] = {}
-        self._cached_tokens: Optional[torch.Tensor] = None
         self._cached_tokens_and_mask: Optional[tuple[torch.Tensor, torch.Tensor]] = None
+        self._cached_entropy_sum: Optional[float] = None
         for child in self.children:
             if child.parent is not self:
                 raise ValueError("Child completion's parent must be this completion.")
@@ -231,13 +231,32 @@ class Completion:
     def max_depth(self, model: Optional[str] = None) -> int:
         return max(self.depths(model=model), default=0)
 
-    def entropy(self) -> float:
+    def entropy(self, cache: bool = False) -> float:
+        """Calculate the average entropy per token.
+
+        Args:
+            cache (bool): Whether to cache entropy calculations for faster retrieval.
+
+        Returns:
+            float: The average entropy per token.
+        """
         num_token_logprobs = self.num_token_logprobs()
         if not num_token_logprobs:
             return 0.0
-        return self.entropy_sum() / num_token_logprobs
+        return self.entropy_sum(cache=cache) / num_token_logprobs
 
-    def entropy_sum(self) -> float:
+    def entropy_sum(self, cache: bool = False) -> float:
+        """Calculate the sum of entropy across all token logprobs.
+
+        Args:
+            cache (bool): Whether to cache the entropy sum for faster retrieval.
+
+        Returns:
+            float: The sum of entropy values.
+        """
+        if cache and self._cached_entropy_sum is not None:
+            return self._cached_entropy_sum
+
         top_logprobs = torch.tensor(
             [
                 [top_logprob.logprob for top_logprob in token_logprob.top_logprobs]
@@ -247,22 +266,44 @@ class Completion:
         )
         if not top_logprobs.size(0):
             return 0.0
-        return (
+
+        entropy_sum = (
             torch.distributions.Categorical(probs=torch.exp(top_logprobs))
             .entropy()
             .sum()
             .item()
         )
 
-    def all_entropy(self) -> float:
+        if cache:
+            self._cached_entropy_sum = entropy_sum
+
+        return entropy_sum
+
+    def all_entropy(self, cache: bool = False) -> float:
+        """Calculate the average entropy per token across this completion and all ancestors.
+
+        Args:
+            cache (bool): Whether to cache entropy calculations for faster retrieval.
+
+        Returns:
+            float: The average entropy per token across the completion chain.
+        """
         all_num_token_logprobs = self.all_num_token_logprobs()
         if not all_num_token_logprobs:
             return 0.0
-        return self.all_entropy_sum() / all_num_token_logprobs
+        return self.all_entropy_sum(cache=cache) / all_num_token_logprobs
 
-    def all_entropy_sum(self) -> float:
-        return self.entropy_sum() + (
-            self.parent.all_entropy_sum() if self.parent else 0.0
+    def all_entropy_sum(self, cache: bool = False) -> float:
+        """Calculate the sum of entropy across this completion and all its ancestors.
+
+        Args:
+            cache (bool): Whether to cache entropy sums for faster retrieval.
+
+        Returns:
+            float: The total sum of entropy values.
+        """
+        return self.entropy_sum(cache=cache) + (
+            self.parent.all_entropy_sum(cache=cache) if self.parent else 0.0
         )
 
     def merge(self) -> "Completion":
@@ -345,8 +386,8 @@ class Completion:
         self.parent.weight /= 2
         self.parent._cached_values = {}
         self.parent._cached_sample_weights = {}
-        self.parent._cached_tokens = None
         self.parent._cached_tokens_and_mask = None
+        self.parent._cached_entropy_sum = None
         return self.parent
 
     def message_params(
@@ -665,8 +706,8 @@ class Completion:
                 self.messages = self.messages[: j + 1]
                 self.reward = 0.0
                 self.children = {child}
-                self._cached_tokens = None
                 self._cached_tokens_and_mask = None
+                self._cached_entropy_sum = None
                 yield from child.split(by=by, at=split_points, weights=weights[split:])
                 return
 

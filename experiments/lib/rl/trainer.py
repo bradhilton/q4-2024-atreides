@@ -353,7 +353,7 @@ class Trainer:
         def get_entropy() -> float:
             return (
                 sum(
-                    leaf.all_entropy()
+                    leaf.all_entropy(cache=True)
                     for episode in episodes
                     for leaf in episode.completion.leaves(model=self.model)
                 )
