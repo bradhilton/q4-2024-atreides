@@ -506,9 +506,7 @@ class Trainer:
                     task.cancel()
                 break
             except BaseException as exception:
-                if return_exceptions:
-                    result.add_exception(exception)
-                else:
+                if not return_exceptions:
                     raise exception
         self.explore_results.append(result)
         return result.completed()
