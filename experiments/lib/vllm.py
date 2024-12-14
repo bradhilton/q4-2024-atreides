@@ -163,11 +163,13 @@ async def start_vllm(
             nonlocal max_concurrent_tokens
             if not max_concurrent_tokens:
                 match = re.search(
-                    r"blah blah blah (\d+) tokens",
+                    r"Maximum concurrency for (\d+) tokens per request: ([\d.]+)x",
                     decoded_line,
                 )
                 if match:
-                    max_concurrent_tokens = int(match.group(1))
+                    max_concurrent_tokens = int(
+                        int(match.group(1)) * float(match.group(2))
+                    )
 
     if process.stdout:
         asyncio.create_task(log_output(process.stdout, sys.stdout))
