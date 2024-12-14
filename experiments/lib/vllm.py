@@ -204,9 +204,11 @@ async def start_vllm(
     if logging:
         print(f"vLLM server started succesfully. Logs can be found at {LOG_FILENAME}")
         logging = False
-    assert (
-        max_concurrent_tokens is not None
-    ), "Max concurrent requests at context length size not logged"
+    if max_concurrent_tokens is None:
+        process.terminate()
+        raise RuntimeError(
+            "Max concurrent requests for the maximum model length not logged"
+        )
     return vLLM(client, max_concurrent_tokens, process)
 
 
