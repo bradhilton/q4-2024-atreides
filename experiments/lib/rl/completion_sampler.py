@@ -20,6 +20,7 @@ from typing import (
 )
 
 from .completion import Completion
+from ..tokenizer import Tokenizer
 from ..utils import get_token
 
 
@@ -122,23 +123,26 @@ class CompletionSampler:
     def __init__(
         self,
         client: AsyncOpenAI,
-        max_concurrent_samples: int = 2**31 - 1,
+        max_concurrent_tokens: int = 2**31 - 1,
         min_time_between_requests: float = 0.0,
         **kwargs: Unpack[SamplingKwargs],
     ) -> None:
         self.client = client
         self.semaphore = ThrottledPrioritySemaphore(
-            max_concurrent_samples,
+            max_concurrent_tokens,
             min_time_between_requests,
         )
         self.kwargs = kwargs
         self.model = kwargs.get("model")
         self.queue: list[asyncio.Event] = []
+        self.average_completion_tokens = 0.0
+        self.num_completions = 0
 
     async def sample_completions(
         self,
         parent: Completion,
         *,
+        tokenizer: Tokenizer,
         continue_last_message_if_assistant: bool = True,
         examples: Union[
             list[ChatCompletionMessageParam],
@@ -172,6 +176,7 @@ class CompletionSampler:
                     *(
                         self.sample_completions(
                             parent,
+                            tokenizer=tokenizer,
                             continue_last_message_if_assistant=continue_last_message_if_assistant,
                             examples=examples,
                             recovery_pattern=recovery_pattern,
@@ -200,6 +205,7 @@ class CompletionSampler:
                     *(
                         self.sample_completions(
                             parent,
+                            tokenizer=tokenizer,
                             continue_last_message_if_assistant=continue_last_message_if_assistant,
                             examples=examples,
                             instructions=instructions,
@@ -236,6 +242,7 @@ class CompletionSampler:
                         *(
                             self.sample_completions(
                                 parent,
+                                tokenizer=tokenizer,
                                 continue_last_message_if_assistant=continue_last_message_if_assistant,
                                 priority=priority,
                                 strip=strip,
@@ -291,17 +298,38 @@ class CompletionSampler:
                     part["text"] if part["type"] == "text" else part["refusal"]
                     for part in prefix
                 )
+            for key in ("max_tokens", "max_completion_tokens"):
+                if untyped_kwargs.get(key):
+                    value = untyped_kwargs[key] - parent.num_prefix_tokens()
+                    assert value > 0, f"{key} must be greater than 0"
+                    untyped_kwargs[key] = value
             untyped_kwargs["extra_body"]["add_generation_prompt"] = False
             untyped_kwargs["extra_body"]["continue_final_message"] = True
         else:
             prefix = ""
         if not "model" in untyped_kwargs:
             untyped_kwargs["model"] = await self.get_model()
-        async with self.semaphore(untyped_kwargs.get("n", 1), priority or 0):
+        prompt_tokens = parent.all_token_count(tokenizer, cache=True)
+        estimated_completion_tokens = min(
+            untyped_kwargs.get("max_tokens")
+            or untyped_kwargs.get("max_completion_tokens")
+            or 0.0,
+            (parent.estimated_completion_tokens() or self.average_completion_tokens),
+        )
+        async with self.semaphore(
+            prompt_tokens + int(estimated_completion_tokens), priority or 0
+        ):
             chat_completion = cast(
                 ChatCompletion,
                 await self.client.chat.completions.create(**untyped_kwargs),
             )
+        assert chat_completion.usage
+        total_completion_tokens = (
+            self.average_completion_tokens * self.num_completions
+            + chat_completion.usage.completion_tokens
+        )
+        self.num_completions += len(chat_completion.choices)
+        self.average_completion_tokens = total_completion_tokens / self.num_completions
         completions = [
             Completion(
                 parent=parent,
@@ -323,6 +351,7 @@ class CompletionSampler:
                     *(
                         self.sample_completions(
                             completion,
+                            tokenizer=tokenizer,
                             continue_last_message_if_assistant=continue_last_message_if_assistant,
                             examples=examples,
                             strip=strip,
@@ -386,9 +415,23 @@ class CompletionSamplerPool(CompletionSampler):
     async def sample_completions(
         self,
         parent: Completion,
+        *,
+        tokenizer: Tokenizer,
         continue_last_message_if_assistant: bool = True,
-        strip: set[str] = set(),
+        examples: Union[
+            list[ChatCompletionMessageParam],
+            Callable[[], list[ChatCompletionMessageParam]],
+        ] = [],
+        instructions: Union[
+            Optional[str],
+            Callable[[Completion], Union[Optional[str], Awaitable[Optional[str]]]],
+        ] = None,
         priority: float = 0.0,
+        recovery_pattern: Union[
+            Optional[str],
+            Callable[[Completion], Union[Optional[str], Awaitable[Optional[str]]]],
+        ] = None,
+        strip: set[str] = set(),
         **kwargs: Unpack[SamplingKwargs],
     ) -> list[Completion]:
         root = parent.root()
@@ -402,9 +445,13 @@ class CompletionSamplerPool(CompletionSampler):
             )
         return await completion_sampler.sample_completions(
             parent,
+            tokenizer=tokenizer,
             continue_last_message_if_assistant=continue_last_message_if_assistant,
-            strip=strip,
+            examples=examples,
+            instructions=instructions,
             priority=priority,
+            recovery_pattern=recovery_pattern,
+            strip=strip,
             **kwargs,
         )
 

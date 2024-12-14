@@ -388,6 +388,7 @@ class Trainer:
             task = asyncio.create_task(
                 episode.sample_completions_v2(
                     completion_sampler,
+                    tokenizer=self.tokenizer,
                     num_parents=1,
                     branch_factor=samples,
                     sampling_kwargs=sampling_kwargs,
@@ -523,6 +524,7 @@ class Trainer:
         for iteration in range(self.explore_options.iterations):
             await episode.sample_completions_v2(
                 completion_sampler=completion_sampler,
+                tokenizer=self.tokenizer,
                 num_parents=self.explore_options.num_parents,
                 branch_factor=self.explore_options.branch_factor,
                 get_recovery_pattern=self.explore_options.get_recovery_pattern,
@@ -874,7 +876,7 @@ class Trainer:
             [
                 CompletionSampler(
                     vllm.client,
-                    max_concurrent_samples=self.vllm_config.max_concurrent_samples,
+                    max_concurrent_tokens=vllm.max_concurrent_tokens,
                     min_time_between_requests=self.vllm_config.min_time_between_requests,
                     model=self.model,
                 )

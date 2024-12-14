@@ -29,6 +29,7 @@ class EpisodeCompletion:
     _completion: Completion
     _sampler: CompletionSampler
     _sampling_kwargs: SamplingKwargs
+    _tokenizer: Tokenizer
     _priority: Optional[int]
 
     @property
@@ -72,6 +73,7 @@ class EpisodeCompletion:
                 message.finish_reason
         completions = await self._sampler.sample_completions(
             Completion(parent=self._completion, messages=messages),
+            tokenizer=self._tokenizer,
             priority=self._priority or 0,
             **{**self._sampling_kwargs, **sampling_kwargs, "n": 1},
         )
@@ -79,6 +81,7 @@ class EpisodeCompletion:
             _completion=completions[0],
             _sampler=self._sampler,
             _sampling_kwargs=self._sampling_kwargs,
+            _tokenizer=self._tokenizer,
             _priority=self._priority,
         )
 
@@ -151,6 +154,7 @@ class Episode:
             parent,
             model,
             completion_sampler,
+            tokenizer,
             branch_factor,
             fork_decay,
             None,
@@ -219,6 +223,7 @@ class Episode:
     async def sample_completions_v2(
         self,
         completion_sampler: CompletionSampler,
+        tokenizer: Tokenizer,
         num_parents: int,
         branch_factor: int,
         get_recovery_pattern: Optional[Callable[[Completion], Optional[str]]] = None,
@@ -234,6 +239,7 @@ class Episode:
 
         Args:
             completion_sampler: The completion sampler to use.
+            tokenizer: The tokenizer to use.
             num_parents: The number of parents to sample completions from.
             branch_factor: The number of completions to sample per parent.
             get_recovery_pattern: A function that returns a recovery pattern to use.
@@ -272,6 +278,7 @@ class Episode:
                         parent,
                         model,
                         completion_sampler,
+                        tokenizer,
                         branch_factor=(
                             max(branch_factor, num_parents * (branch_factor - 1))
                             if len(parents) == 1
@@ -404,6 +411,7 @@ class Episode:
         parent: Completion,
         model: str,
         completion_sampler: CompletionSampler,
+        tokenizer: Tokenizer,
         branch_factor: int,
         fork_decay: float,
         recovery_pattern: Optional[Callable[[Completion], Optional[str]]],
@@ -417,6 +425,7 @@ class Episode:
             return False
         completions = await completion_sampler.sample_completions(
             parent,
+            tokenizer=tokenizer,
             examples=self.examples,
             priority=priority or 0,
             recovery_pattern=recovery_pattern,
@@ -433,6 +442,7 @@ class Episode:
                     completion,
                     completion_sampler,
                     sampling_kwargs,
+                    tokenizer,
                     priority,
                 )
                 for completion in completions

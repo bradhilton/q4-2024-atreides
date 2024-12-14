@@ -95,6 +95,7 @@ async def start_vllm_server(
 @dataclass
 class vLLM:
     client: AsyncOpenAI
+    max_concurrent_tokens: int
     process: asyncio.subprocess.Process
 
 
@@ -146,6 +147,7 @@ async def start_vllm(
         print(f"$ {' '.join(args)}")
     log_file = open(LOG_FILENAME, "a")
     logging = verbosity > 1
+    max_concurrent_tokens: Optional[int] = None
 
     async def log_output(stream: asyncio.StreamReader, io: IO[str]) -> None:
         while True:
@@ -158,6 +160,14 @@ async def start_vllm(
                 io.flush()
             log_file.write(decoded_line)
             log_file.flush()
+            nonlocal max_concurrent_tokens
+            if not max_concurrent_tokens:
+                match = re.search(
+                    r"blah blah blah (\d+) tokens",
+                    decoded_line,
+                )
+                if match:
+                    max_concurrent_tokens = int(match.group(1))
 
     if process.stdout:
         asyncio.create_task(log_output(process.stdout, sys.stdout))
@@ -192,7 +202,10 @@ async def start_vllm(
     if logging:
         print(f"vLLM server started succesfully. Logs can be found at {LOG_FILENAME}")
         logging = False
-    return vLLM(client, process)
+    assert (
+        max_concurrent_tokens is not None
+    ), "Max concurrent requests at context length size not logged"
+    return vLLM(client, max_concurrent_tokens, process)
 
 
 async def start_vllms(

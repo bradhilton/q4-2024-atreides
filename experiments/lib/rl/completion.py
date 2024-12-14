@@ -464,6 +464,46 @@ class Completion:
             yield from self.parent.all_logprobs()
         yield from self.logprobs()
 
+    def estimated_completion_tokens(
+        self, including_self: bool = False
+    ) -> Optional[float]:
+        estimate: Optional[float] = None
+        if including_self:
+            for message in self.messages:
+                if isinstance(message, Choice):
+                    if not message.logprobs:
+                        return None
+                    token_logprobs = (
+                        message.logprobs.content or message.logprobs.refusal
+                    )
+                    if not token_logprobs:
+                        return None
+                    estimate = (estimate or 0.0) + len(token_logprobs)
+                else:
+                    return estimate
+        if (estimate or not including_self or not self.messages) and self.children:
+            estimate = (estimate or 0.0) + sum(
+                child.estimated_completion_tokens(including_self=True) or 0
+                for child in self.children
+            ) / len(self.children)
+            if estimate == 0.0:
+                return None
+        return estimate
+
+    def num_prefix_tokens(self) -> int:
+        num_prefix_tokens = 0
+        for message in reversed(self.messages):
+            if isinstance(message, Choice):
+                assert message.logprobs, "Choice must have logprobs."
+                token_logprobs = message.logprobs.content or message.logprobs.refusal
+                assert token_logprobs, "Choice must have token logprobs."
+                num_prefix_tokens += len(token_logprobs)
+            else:
+                return num_prefix_tokens
+        if self.parent:
+            num_prefix_tokens += self.parent.num_prefix_tokens()
+        return num_prefix_tokens
+
     def root(self) -> "Completion":
         return self.parent.root() if self.parent else self
 
