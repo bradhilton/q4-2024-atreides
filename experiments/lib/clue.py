@@ -3,7 +3,7 @@ import numpy as np
 from ortools.sat.python import cp_model
 import pandas as pd
 import random
-from typing import Iterable, Optional, Union
+from typing import Iterable, Literal, Optional, Union
 
 from .data import player_names
 
@@ -672,3 +672,136 @@ class SolutionCallback(cp_model.CpSolverSolutionCallback):
     def on_solution_callback(self) -> None:
         self.grid += np.vectorize(self.value)(self.vars)
         self.num_solutions += 1
+
+
+def get_variable_difficulty_game(
+    return_first_solver_as_winner: Optional[bool] = None,
+) -> Clue:
+    num_players = random.randint(3, 6)
+    num_weapons = max(
+        3,
+        min(
+            num_players + random.randint(-1, 5),
+            len(Clue.weapons),
+        ),
+    )
+    num_suspects = min(
+        num_weapons + random.randint(0, num_weapons - 1), len(Clue.suspects)
+    )
+    num_rooms = min(num_suspects + random.randint(0, num_suspects - 2), len(Clue.rooms))
+    elements = {
+        "suspect": random.sample(Clue.suspects, k=num_suspects),
+        "weapon": random.sample(Clue.weapons, k=num_weapons),
+        "room": random.sample(Clue.rooms, k=num_rooms),
+    }
+    if random.random() < 0.1:
+        elements["motive"] = random.sample(
+            Clue.motives,
+            k=max(3, min(num_weapons + random.randint(-1, 3), len(Clue.motives))),
+        )
+    if random.random() < 0.1:
+        frequency = random.choice([0.25, 0.5, 1.0])
+        start = 24.0 - frequency
+        end = 0.0
+        for _ in range(random.randint(1, num_weapons + 1)):
+            if random.randint(0, 1):
+                end += frequency
+            else:
+                start -= frequency
+
+        def format_time(time: float) -> str:
+            return f"{int(time):02d}:{int(60 * (time - int(time))):02d}"
+
+        elements["time"] = Clue.get_times(
+            format_time(start), format_time(end), f"{int(frequency * 60)}min"
+        )
+    game = Clue(
+        num_players=num_players,
+        elements=elements,
+    )
+    difficulty_level = num_players + random.randint(-2, 3)
+    # print(f"Players: {num_players}")
+    # for element in elements:
+    #     print(f"{element.capitalize()}: {len(elements[element])}")
+    # print(f"Difficulty level: {difficulty_level}")
+    return game.play(
+        deductive_solver=DeductiveSolver(
+            # note_cards_in_hand=False,
+            # note_responses_to_suggestions=False,
+            # note_cards_that_players_do_not_have=False,
+            # check_unique_card_placement_constraints=False,
+            # check_player_hand_size_constraints=False,
+            check_solution_has_one_and_only_one_card_per_element=difficulty_level > 1,
+            check_one_of_constraints=difficulty_level > 2,
+            check_inverse_one_of_constraints=difficulty_level > 3,
+            merge_and_check_disjoint_inverse_one_of_constraints=difficulty_level > 4,
+            exhaustively_test_possible_assignments=False,
+        ),
+        cp_solver_max_solve_time_per_turn=0.01,
+        check_cp_solver_grid=False,
+        check_if_deductive_solver_and_cp_solver_grids_match=False,
+        return_first_solver_as_winner=(
+            bool(random.randint(0, 1))
+            if return_first_solver_as_winner is None
+            else return_first_solver_as_winner
+        ),
+        print_playthrough=False,
+        max_turns=100,
+    )
+
+
+def get_easy_game(return_first_solver_as_winner: Optional[bool] = None) -> Clue:
+    game = Clue(
+        num_players=3,
+        elements={
+            "suspect": random.sample(Clue.suspects, k=3),
+            "weapon": random.sample(Clue.weapons, k=3),
+            "room": random.sample(Clue.rooms, k=3),
+            # "motive": random.sample(Clue.motives, k=3),
+            # "time": Clue.get_times("21:00", "03:00", "1h"),
+        },
+    )
+    game.play(
+        deductive_solver=DeductiveSolver(
+            # note_cards_in_hand=False,
+            # note_responses_to_suggestions=False,
+            # note_cards_that_players_do_not_have=False,
+            # check_unique_card_placement_constraints=False,
+            # check_player_hand_size_constraints=False,
+            check_solution_has_one_and_only_one_card_per_element=False,
+            check_one_of_constraints=False,
+            check_inverse_one_of_constraints=False,
+            merge_and_check_disjoint_inverse_one_of_constraints=False,
+            exhaustively_test_possible_assignments=False,
+        ),
+        cp_solver_max_solve_time_per_turn=0.01,
+        check_cp_solver_grid=False,
+        check_if_deductive_solver_and_cp_solver_grids_match=False,
+        return_first_solver_as_winner=return_first_solver_as_winner or False,
+        print_playthrough=False,
+        max_turns=100,
+    )
+    return game
+
+
+import fastapi
+from pydantic import BaseModel
+
+app = fastapi.FastAPI()
+
+
+class EpisodeData(BaseModel):
+    prompt: str
+    follow_up: str
+    solution: dict[str, str]
+
+
+@app.get("/new-episode-data")
+def new_episode_data(
+    difficulty: Literal["easy", "variable"] = "variable",
+    return_first_solver_as_winner: Optional[bool] = None,
+) -> EpisodeData:
+    prompt, follow_up, solution = (
+        get_easy_game if difficulty == "easy" else get_variable_difficulty_game
+    )(return_first_solver_as_winner).get_prompt_and_follow_up_and_solution()
+    return EpisodeData(prompt=prompt, follow_up=follow_up, solution=solution)

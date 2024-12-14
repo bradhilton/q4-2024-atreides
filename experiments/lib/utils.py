@@ -5,7 +5,16 @@ import time
 from openai import AsyncOpenAI
 from openai.types.chat.chat_completion_token_logprob import ChatCompletionTokenLogprob
 import torch
-from typing import Any, Callable, Optional, ParamSpec, Sequence, TypeVar, Union
+from typing import (
+    Any,
+    Callable,
+    Coroutine,
+    Optional,
+    ParamSpec,
+    Sequence,
+    TypeVar,
+    Union,
+)
 
 
 def black_print(
@@ -116,6 +125,27 @@ def return_exception(callable: Callable[P, T]) -> Callable[P, Union[T, BaseExcep
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> Union[T, BaseException]:
         try:
             return callable(*args, **kwargs)
+        except BaseException as exception:
+            return exception
+
+    return wrapper
+
+
+def async_return_exception(
+    callable: Callable[P, Coroutine[Any, Any, T]]
+) -> Callable[P, Coroutine[Any, Any, Union[T, BaseException]]]:
+    """Decorator to return exception instead of raising it for async functions.
+
+    Args:
+        callable: Async function to decorate
+
+    Returns:
+        Decorated async function that returns exception instead of raising it
+    """
+
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> Union[T, BaseException]:
+        try:
+            return await callable(*args, **kwargs)
         except BaseException as exception:
             return exception
 
