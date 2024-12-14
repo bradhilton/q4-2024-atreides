@@ -186,13 +186,17 @@ class Episode:
                 (
                     c
                     for c in leaf.ancestors(including_self=True)
-                    if c.max_splits(by=split_method, separators=split_separators) > 0
+                    if c.max_splits(
+                        by=split_method, separators=split_separators, cache=True
+                    )
+                    > 0
                 ),
-                key=lambda c: abs(c.advantage()) * c.split_weight(by=split_method),
+                key=lambda c: abs(c.advantage(cache=True))
+                * c.split_weight(by=split_method, cache=True),
             )
-            assert list(parent.split(by=split_method, separators=split_separators))[
-                :-1
-            ], "Unable to split completion"
+            assert list(
+                parent.split(by=split_method, separators=split_separators, cache=True)
+            )[:-1], "Unable to split completion"
             return parent
         except BaseException as e:
             print(type(e), e)
@@ -213,7 +217,8 @@ class Episode:
                 for completion in self.completion.leaves(model=model)
                 if not where_leaf_or_ancestor_is_splittable
                 or any(
-                    c.max_splits(split_method, separators=split_separators) > 0
+                    c.max_splits(split_method, separators=split_separators, cache=True)
+                    > 0
                     for c in completion.ancestors(including_self=True)
                 )
             ),
@@ -328,7 +333,7 @@ class Episode:
         """
         get_split_value: Callable[[Completion], float] = lambda c: (
             abs(c.advantage(cache=True, model=model))
-            * (c.split_weight(by=split_method) / c.num_token_logprobs())
+            * (c.split_weight(by=split_method, cache=True) / c.num_token_logprobs())
             * c.sample_weight(cache=True, model=model, power=sample_probability_power)
         )
 
@@ -357,7 +362,9 @@ class Episode:
                                     num_parents,
                                     max_splits_per_completion,
                                     c.max_splits(
-                                        by=split_method, separators=split_separators
+                                        by=split_method,
+                                        separators=split_separators,
+                                        cache=True,
                                     ),
                                 ),
                             )
@@ -380,6 +387,7 @@ class Episode:
                     by=split_method,
                     at=self._split_points(num_splits, split_point_std_deviation),
                     separators=split_separators,
+                    cache=True,
                 )
             )[:-1]
         ]

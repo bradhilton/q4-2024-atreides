@@ -84,6 +84,9 @@ class Completion:
         self._cached_sample_weights: dict[tuple[Optional[str], float], float] = {}
         self._cached_tokens_and_mask: Optional[tuple[torch.Tensor, torch.Tensor]] = None
         self._cached_entropy_sum: Optional[float] = None
+        self._cached_split_weights: dict[
+            tuple[SplitMethod, Optional[frozenset[str]]], list[float]
+        ] = {}
         for child in self.children:
             if child.parent is not self:
                 raise ValueError("Child completion's parent must be this completion.")
@@ -400,6 +403,7 @@ class Completion:
         self.parent._cached_sample_weights = {}
         self.parent._cached_tokens_and_mask = None
         self.parent._cached_entropy_sum = None
+        self.parent._cached_split_weights = {}
         return self.parent
 
     def message_params(
@@ -644,11 +648,15 @@ class Completion:
         self,
         by: SplitMethod,
         separators: Optional[set[str]] = None,
+        *,
+        cache: bool,
     ) -> int:
         return max(
             sum(
                 1
-                for weight in self._split_weights(by, separators=separators)
+                for weight in self._split_weights(
+                    by, separators=separators, cache=cache
+                )
                 if weight > 0
             )
             - 1,
@@ -656,16 +664,22 @@ class Completion:
         )
 
     def split_weight(
-        self, by: SplitMethod, separators: Optional[set[str]] = None
+        self,
+        by: SplitMethod,
+        separators: Optional[set[str]] = None,
+        *,
+        cache: bool,
     ) -> float:
-        return sum(self._split_weights(by, separators=separators))
+        return sum(self._split_weights(by, separators=separators, cache=cache))
 
     def split(
         self,
         by: SplitMethod,
         at: Iterable[float] = (0.5,),
+        *,
         separators: Optional[set[str]] = None,
         weights: Optional[Iterable[float]] = None,
+        cache: bool,
     ) -> Iterable["Completion"]:
         """
         Splits this completion into two or more completions at the specified split points.
@@ -677,6 +691,7 @@ class Completion:
             at (Iterable[float]): The split points as a fraction of the total weight in the range (0, 1).
             separators (Optional[set[str]]): An optional set of separators to group tokens when splitting.
             weights (Optional[list[float]]): An optional list of weights for each token logprob. Must be the same length as the number of tokens.
+            cache (bool): Whether to cache split weights for faster retrieval.
 
         Yields:
             Completion: The original completion followed by split completions.
@@ -693,7 +708,9 @@ class Completion:
         split_points = [
             (point - split_point) / (1 - split_point) for point in split_points[1:]
         ]
-        weights = list(weights or self._split_weights(by, separators=separators))
+        weights = list(
+            weights or self._split_weights(by, separators=separators, cache=cache)
+        )
         assert (
             separators is None or len(weights) == self.num_token_logprobs()
         ), "Number of weights does not match number of tokens."
@@ -705,7 +722,9 @@ class Completion:
         )
         if split == 0:
             # Cannot split at start of completion, so yield the remaining splits
-            yield from self.split(by=by, at=split_points, separators=separators)
+            yield from self.split(
+                by=by, at=split_points, separators=separators, cache=cache
+            )
         elif split == len(weights):
             # Cannot split at end of completion, so return early
             return
@@ -760,12 +779,21 @@ class Completion:
                 self.children = {child}
                 self._cached_tokens_and_mask = None
                 self._cached_entropy_sum = None
-                yield from child.split(by=by, at=split_points, weights=weights[split:])
+                self._cached_split_weights = {}
+                yield from child.split(
+                    by=by, at=split_points, weights=weights[split:], cache=False
+                )
                 return
 
     def _split_weights(
-        self, by: SplitMethod, separators: Optional[set[str]]
-    ) -> Iterable[float]:
+        self, by: SplitMethod, separators: Optional[set[str]], *, cache: bool = False
+    ) -> list[float]:
+        if cache:
+            cache_key = (by, frozenset(separators) if separators else None)
+            if cache_key in self._cached_split_weights:
+                return self._cached_split_weights[cache_key]
+
+        weights = []
         weight = 0
         n = 0
         for sequence in self._token_logprob_sequences():
@@ -778,8 +806,8 @@ class Completion:
                         separators is None or not get_token(token_logprob) in separators
                     )
                 ):
-                    yield weight
-                    yield from (0 for _ in range(n - 1))
+                    weights.append(weight)
+                    weights.extend([0] * (n - 1))
                     weight = 0
                     n = 0
                 weight += dict(
@@ -790,8 +818,12 @@ class Completion:
                 n += 1
                 separator = separators is None or get_token(token_logprob) in separators
         if n:
-            yield weight
-            yield from (0 for _ in range(n - 1))
+            weights.append(weight)
+            weights.extend([0] * (n - 1))
+
+        if cache:
+            self._cached_split_weights[cache_key] = weights
+        return weights
 
     def _token_logprob_sequences(self) -> Iterable[list[ChatCompletionTokenLogprob]]:
         return (
