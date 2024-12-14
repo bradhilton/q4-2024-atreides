@@ -47,6 +47,7 @@ class PPOResult:
     policy_weight: torch.Tensor = tensor_field()
     unclipped_policy_weight: torch.Tensor = tensor_field()
     tanh_log_policy_weight: torch.Tensor = tensor_field()
+    reinforce_weight: torch.Tensor = tensor_field()
     value_weight: torch.Tensor = tensor_field()
     entropy_weight: torch.Tensor = tensor_field()
     entropy_target_weight: torch.Tensor = tensor_field()
@@ -59,6 +60,7 @@ class PPOResult:
     policy_loss: torch.Tensor = tensor_field()
     unclipped_policy_loss: torch.Tensor = tensor_field()
     tanh_log_policy_loss: torch.Tensor = tensor_field()
+    reinforce_loss: torch.Tensor = tensor_field()
     value_loss: torch.Tensor = tensor_field()
     entropy_bonus: torch.Tensor = tensor_field()
     entropy_target: torch.Tensor = tensor_field()
@@ -104,6 +106,7 @@ class PPOResult:
             * self.unclipped_policy_loss
             + (self.tanh_log_policy_weight / self.num_tokens)
             * self.tanh_log_policy_loss
+            + (self.reinforce_weight / self.num_tokens) * self.reinforce_loss
             + (self.value_weight / self.num_tokens) * self.value_loss
             - (self.entropy_weight / self.num_tokens) * self.entropy_bonus
             + (self.entropy_target_weight / self.num_tokens) * self.entropy_target_loss
@@ -124,6 +127,7 @@ class PPOLoss(nn.Module):
         policy_coef: float = 1.0,
         unclipped_policy_coef: float = 0.0,
         tanh_log_policy_coef: float = 0.0,
+        reinforce_coef: float = 0.0,
         clip_epsilon: float = 0.2,
         value_coef: float = 0.0,
         entropy_coef: float = 0.01,
@@ -146,6 +150,7 @@ class PPOLoss(nn.Module):
             policy_coef (float): Coefficient for the clipped policy loss. Defaults to 1.0.
             unclipped_policy_coef (float): Coefficient for the unclipped policy loss. Defaults to 0.0.
             tanh_log_policy_coef (float): Coefficient for the tanh log policy loss. Defaults to 0.0.
+            reinforce_coef (float): Coefficient for the REINFORCE loss. Defaults to 0.0.
             clip_epsilon (float): Clipping parameter for PPO (typically between 0.1 and 0.3).
             value_coef (float): Coefficient for the value loss (defaults to 0.0).
             entropy_coef (float): Coefficient for the entropy bonus to encourage exploration.
@@ -165,6 +170,7 @@ class PPOLoss(nn.Module):
         self.policy_coef = policy_coef
         self.unclipped_policy_coef = unclipped_policy_coef
         self.tanh_log_policy_coef = tanh_log_policy_coef
+        self.reinforce_coef = reinforce_coef
         self.clip_epsilon = clip_epsilon
         self.value_coef = value_coef
         self.entropy_coef = entropy_coef
@@ -363,6 +369,9 @@ class PPOLoss(nn.Module):
             -torch.tanh(log_ratio).mul(advantages).mul(weights).sum()
         )  # Scalar
 
+        # Calculate REINFORCE loss
+        reinforce_loss = -(new_logprobs * advantages).mul(weights).sum()  # Scalar
+
         # Calculate the value loss
         # Shape: (num_tokens,)
         value_preds = logits.gather(-1, tokens.unsqueeze(-1)).squeeze(-1)[mask]
@@ -414,6 +423,7 @@ class PPOLoss(nn.Module):
             policy_weight=self.policy_coef * num_tokens,
             unclipped_policy_weight=self.unclipped_policy_coef * num_tokens,
             tanh_log_policy_weight=self.tanh_log_policy_coef * num_tokens,
+            reinforce_weight=self.reinforce_coef * num_tokens,
             value_weight=self.value_coef * num_tokens,
             entropy_weight=self.entropy_coef * num_tokens,
             entropy_target_weight=self.entropy_target_coef * num_tokens,
@@ -426,6 +436,7 @@ class PPOLoss(nn.Module):
             policy_loss=policy_loss,
             unclipped_policy_loss=unclipped_policy_loss,
             tanh_log_policy_loss=tanh_log_policy_loss,
+            reinforce_loss=reinforce_loss,
             value_loss=value_loss,
             entropy_bonus=entropy_bonus,
             entropy_target=self.entropy_target * num_tokens,
