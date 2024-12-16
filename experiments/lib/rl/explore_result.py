@@ -233,12 +233,7 @@ class ExploreResult:
         values[mask] = torch.tensor([value for _ in range(mask.sum())])
         advantages = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
         advantages[mask] = torch.tensor(
-            [
-                advantage
-                for advantage in completion.token_advantages(
-                    cache=True, model=self.model
-                )
-            ]
+            completion.token_advantages(cache=True, model=self.model)
         )
         logprobs = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
         logprobs[mask] = torch.tensor([logprob for logprob in completion.logprobs()])

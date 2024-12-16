@@ -310,15 +310,19 @@ class CompletionSampler:
         if not "model" in untyped_kwargs:
             untyped_kwargs["model"] = await self.get_model()
         prompt_tokens = parent.all_token_count(tokenizer, cache=True)
-        estimated_completion_tokens = min(
-            untyped_kwargs.get("max_tokens")
+        estimated_completion_tokens = (
+            parent.estimated_completion_tokens()
+            or self.average_completion_tokens
+            or untyped_kwargs.get("max_tokens")
             or untyped_kwargs.get("max_completion_tokens")
-            or 0.0,
-            (parent.estimated_completion_tokens() or self.average_completion_tokens),
+            or prompt_tokens
         )
         async with self.semaphore(
             prompt_tokens + int(estimated_completion_tokens), priority or 0
         ):
+            assert (
+                "max_tokens" in untyped_kwargs and untyped_kwargs["max_tokens"] <= 4096
+            )
             chat_completion = cast(
                 ChatCompletion,
                 await self.client.chat.completions.create(**untyped_kwargs),

@@ -520,11 +520,22 @@ class Completion:
 
     def token_advantages(
         self, cache: bool = False, model: Optional[str] = None
-    ) -> Iterable[float]:
+    ) -> list[float]:
         advantage = self.advantage(cache=cache, model=model)
-        num_token_logprobs = self.num_token_logprobs()
-        token_advantage = advantage / max(num_token_logprobs, 1)
-        return (token_advantage for _ in range(num_token_logprobs))
+        token_logprobs = [
+            token_logprob
+            for token_logprobs in self._token_logprob_sequences()
+            for token_logprob in token_logprobs
+        ]
+        token_advantage = advantage / max(len(token_logprobs), 1)
+        token_advantages = [token_advantage] * len(token_logprobs)
+        if (
+            token_advantages
+            and get_token(token_logprobs[-1])
+            == "<|im_end|>"  # TODO: Don't hardcode this token
+        ):
+            token_advantages[-1] = max(token_advantage, 0)
+        return token_advantages
 
     def all_token_advantages(
         self, cache: bool = False, model: Optional[str] = None

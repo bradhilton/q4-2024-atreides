@@ -870,6 +870,8 @@ class Trainer:
         vllms = await self.get_or_start_vllms(
             model=self.model, config=self.vllm_config, verbosity=verbosity
         )
+        if self._completion_sampler:
+            return self._completion_sampler
         self._completion_sampler = CompletionSamplerPool(
             [
                 CompletionSampler(
@@ -910,6 +912,7 @@ class Trainer:
                 vllms = await self._vllm_task
                 for vllm in vllms:
                     vllm.process.terminate()
+                    await vllm.process.wait()
             except BaseException as exception:
                 print(type(exception), exception)
             finally:

@@ -41,6 +41,14 @@ class EpisodeCompletion:
         return self._completion.all_absent_stop_tokens()
 
     @property
+    def completion_tokens(self) -> int:
+        return self._completion.num_token_logprobs()
+
+    @property
+    def all_completion_tokens(self) -> int:
+        return self._completion.all_num_token_logprobs()
+
+    @property
     def last_assistant_message(self) -> ChatCompletionAssistantMessageParam:
         return next(
             message
