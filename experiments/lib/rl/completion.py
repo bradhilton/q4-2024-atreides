@@ -845,6 +845,18 @@ class Completion:
             and choice.logprobs.content
         )
 
+    def token_logprobs(self) -> Iterable[ChatCompletionTokenLogprob]:
+        return (
+            token_logprob
+            for sequence in self._token_logprob_sequences()
+            for token_logprob in sequence
+        )
+
+    def all_token_logprobs(self) -> Iterable[ChatCompletionTokenLogprob]:
+        if self.parent:
+            yield from self.parent.all_token_logprobs()
+        yield from self.token_logprobs()
+
     def num_token_logprobs(self) -> int:
         return sum(len(sequence) for sequence in self._token_logprob_sequences())
 
