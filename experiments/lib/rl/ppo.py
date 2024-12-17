@@ -333,6 +333,12 @@ class PPOLoss(nn.Module):
         # Create mask where advantages and logprobs are not NaN
         mask = ~torch.isnan(advantages) & ~torch.isnan(logprobs)
         num_tokens = mask.sum()
+        if num_tokens == 0:
+            logprobs = torch.zeros_like(logprobs)
+            mask = ~torch.isnan(advantages)
+            num_tokens = mask.sum()
+        if num_tokens == 0:
+            return PPOResult()
 
         # Apply mask to all tensors
         # Shape: (num_tokens,)
@@ -372,16 +378,19 @@ class PPOLoss(nn.Module):
         # Calculate REINFORCE loss
         reinforce_loss = -(new_logprobs * advantages).mul(weights).sum()  # Scalar
 
-        # Calculate the value loss
-        # Shape: (num_tokens,)
-        value_preds = logits.gather(-1, tokens.unsqueeze(-1)).squeeze(-1)[mask]
-        if self.normalize_values:
-            values = (values - values.mean()) / (values.std() + 1e-8)
-        if self.normalize_value_predictions:
-            value_preds = (value_preds - value_preds.mean()) / (
-                value_preds.std() + 1e-8
-            )
-        value_loss = (value_preds - values).pow(2).mul(weights).sum()
+        if self.value_coef:
+            # Calculate the value loss
+            # Shape: (num_tokens,)
+            value_preds = logits.gather(-1, tokens.unsqueeze(-1)).squeeze(-1)[mask]
+            if self.normalize_values:
+                values = (values - values.mean()) / (values.std() + 1e-8)
+            if self.normalize_value_predictions:
+                value_preds = (value_preds - value_preds.mean()) / (
+                    value_preds.std() + 1e-8
+                )
+            value_loss = (value_preds - values).pow(2).mul(weights).sum()
+        else:
+            value_loss = torch.tensor(0.0, device=logits.device)
 
         # Entropy bonus
         entropy_bonus = entropy.mul(weights)
@@ -391,7 +400,7 @@ class PPOLoss(nn.Module):
         # Calculate KL divergence between the old and new policies
         kl_divergence = torch.nn.functional.kl_div(
             new_logprobs,
-            reference_logprobs if reference_logprobs is not None else logprobs,
+            reference_logprobs,
             reduction="none",
             log_target=True,
         ).mul(
@@ -403,7 +412,7 @@ class PPOLoss(nn.Module):
 
         # Calculate reverse KL divergence between the old and new policies
         reverse_kl_divergence = torch.nn.functional.kl_div(
-            reference_logprobs if reference_logprobs is not None else logprobs,
+            reference_logprobs,
             new_logprobs,
             reduction="none",
             log_target=True,
