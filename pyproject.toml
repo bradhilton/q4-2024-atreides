@@ -19,6 +19,7 @@ dependencies = [
     "nbconvert>=7.16.4",
     "neptune>=1.12.0",
     "ortools>=9.11.4210",
+    "polars>=1.17.1",
     "python-constraint>=1.4.0",
     "python-dotenv>=1.0.1",
     "tiktoken>=0.7.0",
