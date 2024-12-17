@@ -665,7 +665,7 @@ class Trainer:
         )
         if (
             not self.reference_clients
-            and self.reference_model != self.model
+            # and self.reference_model != self.model
             and not self.reference_vllm_config
         ):
             self.tune_recipe_config.reference_checkpointer = (
