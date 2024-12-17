@@ -129,6 +129,7 @@ class PPOLoss(nn.Module):
         tanh_log_policy_coef: float = 0.0,
         reinforce_coef: float = 0.0,
         clip_epsilon: float = 0.2,
+        exploitation_penalty: float = 0.0,
         value_coef: float = 0.0,
         entropy_coef: float = 0.01,
         entropy_target: float = 0.5,
@@ -152,6 +153,9 @@ class PPOLoss(nn.Module):
             tanh_log_policy_coef (float): Coefficient for the tanh log policy loss. Defaults to 0.0.
             reinforce_coef (float): Coefficient for the REINFORCE loss. Defaults to 0.0.
             clip_epsilon (float): Clipping parameter for PPO (typically between 0.1 and 0.3).
+            exploitation_penalty (float): Reduces the impact of positive advantages by
+                multiplying them by (1 - exploitation_penalty). This helps prevent
+                premature convergence and encourages exploration. Defaults to 0.0.
             value_coef (float): Coefficient for the value loss (defaults to 0.0).
             entropy_coef (float): Coefficient for the entropy bonus to encourage exploration.
             entropy_target (float): Target entropy (defaults to 0.5).
@@ -172,6 +176,7 @@ class PPOLoss(nn.Module):
         self.tanh_log_policy_coef = tanh_log_policy_coef
         self.reinforce_coef = reinforce_coef
         self.clip_epsilon = clip_epsilon
+        self.exploitation_penalty = exploitation_penalty
         self.value_coef = value_coef
         self.entropy_coef = entropy_coef
         self.entropy_target = entropy_target
@@ -352,6 +357,12 @@ class PPOLoss(nn.Module):
 
         if self.normalize_advantages:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        if self.exploitation_penalty > 0.0:
+            # Reduce positive advantages to discourage greedy exploitation
+            advantages = torch.where(
+                advantages > 0, advantages * (1 - self.exploitation_penalty), advantages
+            )
 
         # Calculate the probability ratio (π_θ(a|s) / π_θ_old(a|s))
         log_ratio = new_logprobs - logprobs  # Shape: (num_tokens,)
