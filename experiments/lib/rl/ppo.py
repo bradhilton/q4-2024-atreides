@@ -130,6 +130,7 @@ class PPOLoss(nn.Module):
         reinforce_coef: float = 0.0,
         clip_epsilon: float = 0.2,
         exploitation_penalty: float = 0.0,
+        use_reference_logprobs: bool = False,
         value_coef: float = 0.0,
         entropy_coef: float = 0.01,
         entropy_target: float = 0.5,
@@ -156,6 +157,8 @@ class PPOLoss(nn.Module):
             exploitation_penalty (float): Reduces the impact of positive advantages by
                 multiplying them by (1 - exploitation_penalty). This helps prevent
                 premature convergence and encourages exploration. Defaults to 0.0.
+            use_reference_logprobs (bool): If True, uses reference_logprobs instead of
+                logprobs for policy losses. Defaults to False.
             value_coef (float): Coefficient for the value loss (defaults to 0.0).
             entropy_coef (float): Coefficient for the entropy bonus to encourage exploration.
             entropy_target (float): Target entropy (defaults to 0.5).
@@ -177,6 +180,7 @@ class PPOLoss(nn.Module):
         self.reinforce_coef = reinforce_coef
         self.clip_epsilon = clip_epsilon
         self.exploitation_penalty = exploitation_penalty
+        self.use_reference_logprobs = use_reference_logprobs
         self.value_coef = value_coef
         self.entropy_coef = entropy_coef
         self.entropy_target = entropy_target
@@ -364,8 +368,9 @@ class PPOLoss(nn.Module):
                 advantages > 0, advantages * (1 - self.exploitation_penalty), advantages
             )
 
+        old_logprobs = reference_logprobs if self.use_reference_logprobs else logprobs
         # Calculate the probability ratio (π_θ(a|s) / π_θ_old(a|s))
-        log_ratio = new_logprobs - logprobs  # Shape: (num_tokens,)
+        log_ratio = new_logprobs - old_logprobs  # Shape: (num_tokens,)
         ratio = torch.exp(log_ratio)  # Shape: (num_tokens,)
 
         # Calculate the surrogate losses
