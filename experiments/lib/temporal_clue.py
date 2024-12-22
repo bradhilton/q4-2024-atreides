@@ -569,6 +569,7 @@ class TemporalClueScenario:
             "Mr. Boddy": self.mr_boddy_time_rooms,
         }
         self.time_room_pieces = self._get_room_occupancy(self.piece_time_rooms)
+        self.pieces = list(self.piece_time_rooms.keys())
 
         self.articles: dict[str, str] = {
             weapon_or_room: "the " for weapon_or_room in self.weapons + self.rooms
@@ -892,10 +893,10 @@ class TemporalClueScenario:
             bias=-0.1,
         )
 
-    def piece_time_room_clues(self, false_room: bool = False) -> Iterable[TemporalClue]:
+    def piece_time_room_clues(self, false: bool = False) -> Iterable[TemporalClue]:
         for piece, time_rooms in shuffled(self.piece_time_rooms.items()):
             for time, room in shuffled(time_rooms.items()):
-                if false_room:
+                if false:
                     room = random.choice([r for r in self.rooms if r != room])
                 if piece == self.murderer:
                     yield TemporalClue(
@@ -919,15 +920,26 @@ class TemporalClueScenario:
                 )
 
     def indirect_clues(self) -> Iterable[TemporalClue]:
-        yield from self.xor_piece_time_room_clues()
+        yield from self.xor_clues()
         yield from self.same_time_or_place_clues()
         yield from self.character_move_clues()
         yield from self.weapon_move_clues()
+        yield from self.spatial_relation_clues()
 
-    def xor_piece_time_room_clues(self) -> Iterable[TemporalClue]:
+    def xor_clues(self) -> Iterable[TemporalClue]:
         for clue1, clue2 in zip(
-            shuffled(self.piece_time_room_clues()),
-            shuffled(self.piece_time_room_clues(false_room=True)),
+            shuffled(
+                itertools.chain(
+                    self.piece_time_room_clues(),
+                    self.same_time_or_place_clues(),
+                )
+            ),
+            shuffled(
+                itertools.chain(
+                    self.piece_time_room_clues(false=True),
+                    # self.same_time_or_place_clues(false=True),
+                )
+            ),
         ):
             if random.random() < 0.5:
                 clue1, clue2 = clue2, clue1
@@ -936,36 +948,44 @@ class TemporalClueScenario:
                     model.sum(c1.get_bool_var(model), c2.get_bool_var(model), value=1)
                 ),
                 description=f"{clue1.description} or {clue2.description.replace("The ", "the ")}",
+                bias=(clue1.bias + clue2.bias) / 2,
             )
 
-    def same_time_or_place_clues(self) -> Iterable[TemporalClue]:
+    def same_time_or_place_clues(self, false: bool = False) -> Iterable[TemporalClue]:
         for time, room_pieces in shuffled(self.time_room_pieces.items()):
             for room, pieces in shuffled(room_pieces.items()):
-                if not len(pieces) > 1:
+                if not len(pieces) > 1 and not false:
                     continue
                 pieces = shuffled(pieces)
-                piece1 = pieces.pop()
-                piece2 = pieces.pop()
+                if false:
+                    piece1, piece2 = random.sample(self.pieces, k=2)
+                    if piece1 in pieces and piece2 in pieces:
+                        continue
+                else:
+                    piece1 = pieces.pop()
+                    piece2 = pieces.pop()
                 if piece1 == self.murderer and not piece2 in self.suspects:
                     piece1 = "The murderer"
+                    if false:
+                        continue
                 if piece1 == self.murder_weapon and not piece2 in self.weapons:
                     piece1 = "The murder weapon"
+                    if false:
+                        continue
                 if random.random() < 0.5:
                     yield TemporalClue(
                         description=f"{self.articles.get(piece1, '').capitalize()}{piece1} was in the same room as {self.articles.get(piece2, '')}{piece2} at {time}",
-                        get_bool_var=lambda model, p1=piece1, p2=piece2, t=time: model.all(
-                            model.categorical_any_equal(
-                                (
-                                    model.murderer_room_vars(t)
-                                    if p1 == "The murderer"
-                                    else (
-                                        model.murder_weapon_room_vars(t)
-                                        if p1 == "The murder weapon"
-                                        else model.piece_time_room_vars[p1][t]
-                                    )
-                                ),
-                                model.piece_time_room_vars[p2][t],
-                            )
+                        get_bool_var=lambda model, p1=piece1, p2=piece2, t=time: model.categorical_any_equal(
+                            (
+                                model.murderer_room_vars(t)
+                                if p1 == "The murderer"
+                                else (
+                                    model.murder_weapon_room_vars(t)
+                                    if p1 == "The murder weapon"
+                                    else model.piece_time_room_vars[p1][t]
+                                )
+                            ),
+                            model.piece_time_room_vars[p2][t],
                         ),
                         bias=0.5 + (1.5 if "murder" in piece1 else 0),
                     )
@@ -1042,6 +1062,89 @@ class TemporalClueScenario:
                     model.weapon_time_room_vars[w.weapon][w.time][w.to_room],
                 ),
                 bias=0.1,
+            )
+
+    def spatial_relation_clues(self) -> Iterable[TemporalClue]:
+        """Generates clues based on spatial relationships between pieces at the same time."""
+        for _ in range(10):
+            time = random.choice(self.times)
+            (room1, pieces1), (room2, pieces2) = random.sample(
+                list(
+                    (room, pieces)
+                    for room, pieces in self.time_room_pieces[time].items()
+                    if pieces
+                ),
+                k=2,
+            )
+            piece1, piece2 = random.choice(list(pieces1)), random.choice(list(pieces2))
+            coords1, coords2 = self.room_coords[room1], self.room_coords[room2]
+            dx = coords1[0] - coords2[0]
+            dy = coords1[1] - coords2[1]
+            if dx != 0 and dy != 0:
+                continue
+            if dx != 0:
+                direction = "east" if dx > 0 else "west"
+                distance = abs(dx)
+            else:
+                direction = "north" if dy > 0 else "south"
+                distance = abs(dy)
+            if distance > 1 or random.random() < 0.5:
+                distance = 2
+            pairs = [
+                (r1, r2)
+                for r1 in self.rooms
+                for r2 in self.rooms
+                if r1 != r2
+                and (
+                    self.room_coords[r1]
+                    == (
+                        self.room_coords[r2][0] + dx,
+                        self.room_coords[r2][1] + dy,
+                    )
+                    if distance == 1
+                    else (
+                        (
+                            dx > 0
+                            and self.room_coords[r1][0] > self.room_coords[r2][0]
+                            and self.room_coords[r1][1] == self.room_coords[r2][1]
+                        )
+                        or (
+                            dx < 0
+                            and self.room_coords[r1][0] < self.room_coords[r2][0]
+                            and self.room_coords[r1][1] == self.room_coords[r2][1]
+                        )
+                        or (
+                            dy > 0
+                            and self.room_coords[r1][0] == self.room_coords[r2][0]
+                            and self.room_coords[r1][1] > self.room_coords[r2][1]
+                        )
+                        or (
+                            dy < 0
+                            and self.room_coords[r1][0] == self.room_coords[r2][0]
+                            and self.room_coords[r1][1] < self.room_coords[r2][1]
+                        )
+                    )
+                )
+            ]
+            assert (room1, room2) in pairs
+            yield TemporalClue(
+                description=(
+                    f"{self.articles.get(piece1, '').capitalize()}"
+                    f"{piece1} was in {'a' if distance > 1 else 'the'} room "
+                    f"{'just ' if distance == 1 else ''}{direction} of the room "
+                    f"{self.articles.get(piece2, '')}{piece2} was in at {time}"
+                ),
+                get_bool_var=lambda model, p1=piece1, p2=piece2, t=time, ps=pairs: model.sum(
+                    *(
+                        model.all(
+                            model.piece_time_room_vars[p1][t][r1],
+                            model.piece_time_room_vars[p2][t][r2],
+                        )
+                        for r1, r2 in ps
+                    ),
+                    value=1,
+                ),
+                bias=0.0,
             )
 
     def sufficient_clues(self, model: TemporalClueCpModel, debug: bool = False) -> bool:
