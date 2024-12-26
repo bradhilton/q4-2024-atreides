@@ -56,17 +56,18 @@ class Clue:
         "Studio",
     ]
 
+    # A suspect motivated by {motive} murdered Mr. Boddy.
     motives = [
         "Revenge",
         "Jealousy",
         "Greed",
-        "Blackmail",
         "Power",
-        "Cover-up",
+        "Hatred",
+        "Anger",
+        "Fear",
+        "Ambition",
         "Betrayal",
-        "Obsession",
-        "Inheritance",
-        "Self-preservation",
+        "Pride"
     ]
 
     @staticmethod
