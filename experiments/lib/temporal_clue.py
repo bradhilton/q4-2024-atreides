@@ -1,13 +1,23 @@
 import itertools
 import black
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 import math
 from ortools.sat.python import cp_model
+import os
+from PIL import Image, ImageDraw, ImageFont  # type: ignore
 import random
 import re
-from typing import Callable, Hashable, Iterable, Literal, NewType, TypeVar, Union
-from PIL import Image, ImageDraw, ImageFont  # type: ignore
-import os
+from typing import (
+    Callable,
+    Hashable,
+    Iterable,
+    Literal,
+    NewType,
+    TypedDict,
+    TypeVar,
+    Union,
+)
 
 from .clue import Clue
 from .utils import retry
@@ -79,15 +89,14 @@ class TemporalClueCpModel(cp_model.CpModel):
             }
             for motive in scenario.motives
         }
-        if scenario.unique_motives:
-            for motive in scenario.motives:
-                self.add(
-                    sum(
-                        self.suspect_motive_vars[suspect][motive]
-                        for suspect in scenario.suspects
-                    )
-                    == 1
+        for motive, suspects in scenario.motive_suspects.items():
+            self.add(
+                sum(
+                    self.suspect_motive_vars[suspect][motive]
+                    for suspect in scenario.suspects
                 )
+                == len(suspects)
+            )
 
         # Create variables for weapon locations at each time
         self.weapon_time_room_vars = {
@@ -295,7 +304,7 @@ class TemporalClueCpModel(cp_model.CpModel):
             f"motivated by {motive}",
             time,
             room,
-            unique=self.scenario.unique_motives,
+            # number=len(self.scenario.motive_suspects[motive]),
         )
 
     def motive_room_vars(
@@ -359,7 +368,7 @@ class TemporalClueCpModel(cp_model.CpModel):
         variable: str,
         time: Time,
         room: Room,
-        unique: bool = True,
+        number: int | None = None,
     ) -> cp_model.IntVar:
         key = (
             frozenset(element_time_room_vars.keys()),
@@ -383,7 +392,7 @@ class TemporalClueCpModel(cp_model.CpModel):
             self.add(var == 1).only_enforce_if(variable_var, time_room_var)
             self.add(var == 0).only_enforce_if(~self.all(variable_var, time_room_var))
             vars.append(var)
-        var = self.sum(*vars, value=1) if unique else self.any(*vars)
+        var = self.sum(*vars, value=number) if number is not None else self.any(*vars)
         self._variable_element_time_room_vars[key] = var  # type: ignore
         return var
 
@@ -411,6 +420,7 @@ class TemporalClue:
     get_bool_var: Callable[[TemporalClueCpModel], cp_model.IntVar]
     bias: float = 0.0
     question_answer: tuple[str, Answer] | None = None
+    tags: list[str] = field(default_factory=list)
 
 
 prompt_template = """
@@ -468,6 +478,7 @@ class TemporalCluePuzzle:
     clues: list[str]
     questions: dict[str, Answer]
     bonus_questions: dict[str, Answer]
+    tag_counts: dict[str, int]
 
     @property
     def all_questions(self) -> dict[str, Answer]:
@@ -492,12 +503,21 @@ class TemporalCluePuzzle:
             suspects="\n".join(f"• {suspect}" for suspect in self.scenario.suspects),
             weapons="\n".join(f"• {weapon}" for weapon in self.scenario.weapons),
             rooms="\n".join(
-                f"{i}. {room}" for i, room in enumerate(self.scenario.rooms, start=1)
+                f"{i:0{1 if self.scenario.num_rooms < 10 else 2}d}. {room}"
+                for i, room in enumerate(self.scenario.rooms, start=1)
             ),
             board=self.scenario.formatted_board(),
             times="\n".join(f"• {time}" for time in self.scenario.times),
-            uniquely="uniquely " if self.scenario.unique_motives else "",
-            motives="\n".join(f"• {motive}" for motive in self.scenario.motives),
+            uniquely=("uniquely " if self.scenario.unique_motives else ""),
+            motives="\n".join(
+                f"• {motive}"
+                + (
+                    ""
+                    if self.scenario.unique_motives
+                    else f" ({len(suspects)} suspect{'' if len(suspects) == 1 else 's'})"
+                )
+                for motive, suspects in self.scenario.motive_suspects.items()
+            ),
             clues="\n".join(f"- {clue}" for clue in self.clues),
             questions="\n".join(
                 [
@@ -554,6 +574,22 @@ class TemporalCluePuzzle:
             )
         return prompt
 
+    def json_data(self) -> "TemporalCluePuzzleJsonData":
+        return {
+            "num_clues": len(self.clues),
+            "prompt": self.prompt(),
+            "solution": {
+                f"{chr(65+i)}": answer
+                for i, answer in enumerate(self.all_questions.values())
+            },
+        }
+
+
+class TemporalCluePuzzleJsonData(TypedDict):
+    num_clues: int
+    prompt: str
+    solution: dict[str, str]
+
 
 TemporalCluePuzzle__repr__ = TemporalCluePuzzle.__repr__
 
@@ -589,11 +625,11 @@ class SolutionCallback(cp_model.CpSolverSolutionCallback):
 
 class TemporalClueScenario:
 
-    @retry(max_attempts=10, delay=0, exceptions=(NoValidMurderSolutionError,))
+    @retry(max_attempts=60, delay=0, exceptions=(NoValidMurderSolutionError,))
     def __init__(
         self,
         *,
-        min_players: int = 3,
+        min_players: int = 1,
         max_players: int = 6,
         max_suspects: int | None = None,
         max_weapons: int | None = None,
@@ -607,12 +643,13 @@ class TemporalClueScenario:
         """Initialize a new Temporal Clue game.
 
         Args:
-            min_players: Minimum number of players (default: 3)
+            min_players: Minimum number of players (default: 1)
             max_players: Maximum number of players (default: 6)
             max_suspects: Maximum number of suspects (default: len(Clue.suspects))
             max_weapons: Maximum number of weapons (default: len(Clue.weapons))
             max_rooms: Maximum number of rooms (default: len(Clue.rooms))
             max_times: Maximum number of time periods (default: None)
+            max_motives: Maximum number of motives (default: None)
             character_move_probability: Probability a character moves each time period (default: 0.5)
             suspect_moves_weapon_probability: Probability a suspect moves the weapon they are holding (default: 0.8)
             unique_motives: If True, each suspect has a unique motive. If False, multiple suspects may share the
@@ -641,6 +678,7 @@ class TemporalClueScenario:
         self.max_motives = min(
             max_motives or 2**31,
             self.max_suspects,
+            len(Clue.motives),
         )
         self.unique_motives = (
             unique_motives
@@ -673,13 +711,11 @@ class TemporalClueScenario:
             self.num_suspects + random.randint(0, self.num_suspects - 2),
             self.max_rooms,
         )
-        self.num_times = random.randint(
-            min(self.num_players, self.max_times), self.max_times
-        )
+        self.num_times = random.randint(1, self.max_times)
         self.num_motives = (
-            self.num_suspects
+            min(self.num_suspects, self.max_motives)
             if self.unique_motives
-            else random.randint(1, min(round(self.num_suspects / 2), self.max_motives))
+            else random.randint(1, min(self.num_suspects, self.max_motives))
         )
 
         # Select random game elements
@@ -746,12 +782,34 @@ class TemporalClueScenario:
             for suspect, motive in zip(
                 self.suspects,
                 (
-                    shuffled(self.motives)
+                    (
+                        motive
+                        for _ in range(self.num_motives // self.num_suspects + 1)
+                        for motive in shuffled(self.motives)
+                    )
                     if self.unique_motives
                     else random.choices(self.motives, k=self.num_suspects)
                 ),
             )
         }
+        self.motive_suspects = {
+            motive: {
+                suspect
+                for suspect, suspect_motive in self.suspect_motives.items()
+                if motive == suspect_motive
+            }
+            for motive in self.motives
+        }
+        self.motive_suspects = {
+            motive: suspects
+            for motive, suspects in self.motive_suspects.items()
+            if suspects
+        }
+        self.motives = list(self.motive_suspects)
+        self.num_motives = len(self.motives)
+        self.unique_motives = all(
+            len(suspects) == 1 for suspects in self.motive_suspects.values()
+        )
 
         # Generate murder solution
         self.murderer, self.murder_weapon, self.murder_room, self.murder_time = (
@@ -987,12 +1045,24 @@ class TemporalClueScenario:
         ]
 
         # Fill in room numbers (1-based indexing)
+        needs_padding = len(self.rooms) > 9
         for room, (x, y) in self.room_coords.items():
-            board[self.board_rows - y - 1][x] = str(self.room_indices[room] + 1)
+            room_num = str(self.room_indices[room] + 1)
+            if needs_padding and len(room_num) == 1:
+                room_num = "0" + room_num
+            board[self.board_rows - y - 1][x] = room_num
 
         # Add North/South indicators above each column
-        north = "  " + " ".join("N" * self.board_columns) + "  \n"
-        south = "  " + " ".join("S" * self.board_columns) + "  "
+        north = (
+            "  "
+            + " ".join((["NN"] if needs_padding else "N") * self.board_columns)
+            + "  \n"
+        )
+        south = (
+            "  "
+            + " ".join((["SS"] if needs_padding else "S") * self.board_columns)
+            + "  "
+        )
 
         # Add West/East indicators and format rows
         rows = []
@@ -1041,7 +1111,7 @@ class TemporalClueScenario:
         piece_time_room_clues = list(self.piece_time_room_clues())
         motive_clues = list(self.motive_clues())
         clues = solution_clues + piece_time_room_clues + motive_clues
-        clues += list(self.indirect_clues())
+        clues += list(self.indirect_clues(num_clues=len(clues)))
         clues = sorted(clues, key=lambda clue: clue.bias + random.random())
         needed_clues: list[TemporalClue] = []
 
@@ -1077,6 +1147,7 @@ class TemporalClueScenario:
             clues=shuffled([clue.description for clue in needed_clues]),
             questions=questions,
             bonus_questions=bonus_questions,
+            tag_counts=Counter(tag for clue in needed_clues for tag in clue.tags),
         )
 
     def solution_clues(self) -> Iterable[TemporalClue]:
@@ -1085,18 +1156,21 @@ class TemporalClueScenario:
             get_bool_var=lambda model: model.murderer_vars[self.murderer],
             bias=-0.2,
             question_answer=("Who murdered Mr. Boddy?", self.murderer),
+            tags=["direct", "solution", "murderer"],
         )
         yield TemporalClue(
             description=f"Mr. Boddy was killed with the {self.murder_weapon}",
             get_bool_var=lambda model: model.murder_weapon_vars[self.murder_weapon],
             bias=-0.2,
             question_answer=("What weapon did the murderer use?", self.murder_weapon),
+            tags=["direct", "solution", "murder_weapon"],
         )
         yield TemporalClue(
             description=f"Mr. Boddy was murdered in the {self.murder_room}",
             get_bool_var=lambda model: model.murder_room_vars[self.murder_room],
             bias=-0.2,
             question_answer=("Where was the murder committed?", self.murder_room),
+            tags=["direct", "solution", "murder_room"],
         )
         if len(self.times) > 1:
             yield TemporalClue(
@@ -1104,10 +1178,11 @@ class TemporalClueScenario:
                 get_bool_var=lambda model: model.murder_time_vars[self.murder_time],
                 bias=-0.2,
                 question_answer=("When did the murder occur?", self.murder_time),
+                tags=["direct", "solution", "murder_time"],
             )
         if len(self.motives) > 1:
             yield TemporalClue(
-                description=f"Mr. Boddy was murdered by {'the' if self.unique_motives else 'a'} suspect motivated by {self.suspect_motives[self.murderer]}",
+                description=f"Mr. Boddy was murdered by {self.motive_article(self.suspect_motives[self.murderer])} suspect motivated by {self.suspect_motives[self.murderer]}",
                 get_bool_var=lambda model: model.categorical_exactly_one_equal(
                     model.motive_suspect_vars[self.suspect_motives[self.murderer]],
                     model.murderer_vars,
@@ -1117,7 +1192,14 @@ class TemporalClueScenario:
                     "Why did the murderer do it?",
                     self.suspect_motives[self.murderer],
                 ),
+                tags=["direct", "solution", "motive"],
             )
+
+    def motive_article(self, motive: Motive) -> str:
+        return "the" if len(self.motive_suspects[motive]) == 1 else "a"
+
+    def has_unique_motive(self, suspect: Suspect) -> bool:
+        return len(self.motive_suspects[self.suspect_motives[suspect]]) == 1
 
     def piece_time_room_clues(self, false: bool = False) -> Iterable[TemporalClue]:
         for piece, time_rooms in shuffled(self.piece_time_rooms.items()):
@@ -1130,6 +1212,8 @@ class TemporalClueScenario:
                             model.murderer_time_room_var(t, r)
                         ),
                         description=f"The murderer was {self.prepositions.get(room, 'in')} the {room} at {time}",
+                        bias=-0.1,
+                        tags=["direct", "piece_time_room", "murderer"],
                     )
                 if piece == self.murder_weapon:
                     yield TemporalClue(
@@ -1137,6 +1221,8 @@ class TemporalClueScenario:
                             t, r
                         ),
                         description=f"The murder weapon was {self.prepositions.get(room, 'in')} the {room} at {time}",
+                        bias=-0.1,
+                        tags=["direct", "piece_time_room", "murder_weapon"],
                     )
                 yield TemporalClue(
                     description=f"{self.articles.get(piece, '').capitalize()}{piece} was {self.prepositions.get(room, 'in')} the {room} at {time}",
@@ -1151,14 +1237,16 @@ class TemporalClueScenario:
                         if piece != "Mr. Boddy"
                         else None
                     ),
+                    bias=-0.15,
+                    tags=["direct", "piece_time_room"],
                 )
                 if (
                     len(self.motives) > 1
                     and piece in self.suspects
-                    and (not false or self.unique_motives)
+                    and (not false or self.has_unique_motive(piece))
                 ):
                     yield TemporalClue(
-                        description=f"{'The' if self.unique_motives else 'A'} suspect motivated by {self.suspect_motives[piece]} was {self.prepositions.get(room, 'in')} the {room} at {time}",
+                        description=f"{self.motive_article(self.suspect_motives[piece]).capitalize()} suspect motivated by {self.suspect_motives[piece]} was {self.prepositions.get(room, 'in')} the {room} at {time}",
                         get_bool_var=lambda model, s=piece, t=time, r=room: model.motive_time_room_var(
                             self.suspect_motives[s], t, r
                         ),
@@ -1167,9 +1255,11 @@ class TemporalClueScenario:
                                 f"Where was the suspect motivated by {self.suspect_motives[piece]} at {time}?",
                                 room,
                             )
-                            if self.unique_motives
+                            if self.has_unique_motive(piece)
                             else None
                         ),
+                        bias=-0.15,
+                        tags=["direct", "piece_time_room", "motive"],
                     )
 
     def motive_clues(self) -> Iterable[TemporalClue]:
@@ -1182,29 +1272,32 @@ class TemporalClueScenario:
                     ),
                     question_answer=(
                         (f"What motivates {suspect}?", motive)
-                        if random.random() < 0.5 or not self.unique_motives
+                        if random.random() < 0.5 or not self.has_unique_motive(suspect)
                         else (f"Who is motivated by {motive}?", suspect)
                     ),
+                    tags=["direct", "motive"],
                 )
 
-    def indirect_clues(self) -> Iterable[TemporalClue]:
-        yield from self.xor_clues()
-        yield from self.same_time_or_place_clues()
-        yield from self.character_move_clues()
+    def indirect_clues(self, num_clues: int) -> Iterable[TemporalClue]:
+        num_clues = round(num_clues / 6) * 2
+        yield from self.xor_clues(num_clues)
+        yield from self.iff_clues(num_clues)
+        yield from itertools.islice(self.same_time_or_room_clues(), num_clues)
+        yield from itertools.islice(self.character_move_clues(), num_clues)
         yield from self.weapon_move_clues()
-        yield from self.spatial_relation_clues()
+        yield from self.spatial_relation_clues(num_clues)
 
-    def xor_clues(self) -> Iterable[TemporalClue]:
+    def xor_clues(self, num_clues: int) -> Iterable[TemporalClue]:
         for clue1, clue2 in zip(
             shuffled(
                 itertools.chain(
-                    self.piece_time_room_clues(),
+                    itertools.islice(self.piece_time_room_clues(), num_clues),
                     # self.same_time_or_place_clues(),
                 )
             ),
             shuffled(
                 itertools.chain(
-                    self.piece_time_room_clues(false=True),
+                    itertools.islice(self.piece_time_room_clues(false=True), num_clues),
                     # self.same_time_or_place_clues(false=True),
                 )
             ),
@@ -1215,11 +1308,56 @@ class TemporalClueScenario:
                 get_bool_var=lambda model, c1=clue1, c2=clue2: (
                     model.sum(c1.get_bool_var(model), c2.get_bool_var(model), value=1)
                 ),
-                description=f"{clue1.description} or {clue2.description.replace("The ", "the ")}",
-                bias=(clue1.bias + clue2.bias) / 2,
+                description=f"{clue1.description} or {clue2.description.replace("The ", "the ").replace("A ", "a ")}",
+                bias=(clue1.bias + clue2.bias) / 2 + 0.1,
+                tags=["indirect", "xor"],
             )
 
-    def same_time_or_place_clues(self, false: bool = False) -> Iterable[TemporalClue]:
+    def iff_clues(self, num_clues: int) -> Iterable[TemporalClue]:
+        num_clues = round(num_clues / 2)
+        for clue1, clue2 in shuffled(
+            itertools.chain(
+                zip(
+                    itertools.islice(
+                        self.piece_time_room_clues(),
+                        num_clues,
+                    ),
+                    itertools.islice(
+                        self.piece_time_room_clues(),
+                        num_clues,
+                    ),
+                ),
+                zip(
+                    itertools.islice(
+                        self.piece_time_room_clues(false=True),
+                        num_clues,
+                    ),
+                    itertools.islice(
+                        self.piece_time_room_clues(false=True),
+                        num_clues,
+                    ),
+                ),
+            )
+        ):
+
+            def get_bool_var(
+                model: TemporalClueCpModel, c1=clue1, c2=clue2
+            ) -> cp_model.IntVar:
+                v1, v2 = c1.get_bool_var(model), c2.get_bool_var(model)
+                return model.sum(
+                    model.all(v1, v2),
+                    model.sum(v1, v2, value=0),
+                    value=1,
+                )
+
+            yield TemporalClue(
+                get_bool_var=get_bool_var,
+                description=f"{clue1.description} if and only if {clue2.description.replace("The ", "the ").replace("A ", "a ")}",
+                bias=(clue1.bias + clue2.bias) / 2 + 0.2,
+                tags=["indirect", "iff"],
+            )
+
+    def same_time_or_room_clues(self, false: bool = False) -> Iterable[TemporalClue]:
         for time, room_pieces in shuffled(self.time_room_pieces.items()):
             for room, pieces in shuffled(room_pieces.items()):
                 if not len(pieces) > 1 and not false:
@@ -1246,13 +1384,30 @@ class TemporalClueScenario:
                     and not piece2 in self.suspects
                 ):
                     motive = self.suspect_motives[piece1]
-                    piece1 = f"{'The' if self.unique_motives else 'A'} suspect motivated by {self.suspect_motives[piece1]}"
+                    piece1 = f"{self.motive_article(motive).capitalize()} suspect motivated by {motive}"
                 if (
                     random.random() < 0.66
                     and piece1 == self.murder_weapon
                     and not piece2 in self.weapons
                 ):
                     piece1 = "The murder weapon"
+                tags = [
+                    tag
+                    for tag in (
+                        "indirect",
+                        "same_time_or_place",
+                        (
+                            "murderer"
+                            if piece1 == "The murderer"
+                            else (
+                                "murder_weapon"
+                                if piece1 == "The murder weapon"
+                                else "motive" if motive is not None else None
+                            )
+                        ),
+                    )
+                    if tag is not None
+                ]
                 if random.random() < 0.5:
                     yield TemporalClue(
                         description=f"{self.articles.get(piece1, '').capitalize()}{piece1} was in the same room as {self.articles.get(piece2, '')}{piece2} at {time}",
@@ -1273,6 +1428,7 @@ class TemporalClueScenario:
                             model.piece_time_room_vars[p2][t],
                         ),
                         bias=0.5 + (1.5 if "murder" in piece1 else 0),
+                        tags=tags + ["same_room"],
                     )
                 elif len(self.times) > 1:
                     yield TemporalClue(
@@ -1293,7 +1449,8 @@ class TemporalClueScenario:
                             ),
                             model.piece_room_time_vars[p2][r],
                         ),
-                        bias=0.5 + (1.5 if "murder" in piece1 else 0),
+                        bias=0.8 + (1.5 if "murder" in piece1 else 0),
+                        tags=tags + ["same_time"],
                     )
 
     def character_move_clues(self) -> Iterable[TemporalClue]:
@@ -1308,10 +1465,12 @@ class TemporalClueScenario:
                         model.murderer_time_room_var(c.time, c.to_room),
                     ),
                     bias=0.2,
+                    tags=["indirect", "character_move", "murderer"],
                 )
             if len(self.motives) > 1 and character in self.suspects:
+                motive = self.suspect_motives[character]
                 yield TemporalClue(
-                    description=f"{'The' if self.unique_motives else 'A'} suspect motivated by {self.suspect_motives[character]} moved from the {character_move.from_room} to the {character_move.to_room} at {character_move.time}",
+                    description=f"{self.motive_article(motive).capitalize()} suspect motivated by {motive} moved from the {character_move.from_room} to the {character_move.to_room} at {character_move.time}",
                     get_bool_var=lambda model, c=character, m=character_move, pt=prev_time: model.all(
                         model.motive_time_room_var(
                             self.suspect_motives[c], pt, m.from_room
@@ -1321,6 +1480,7 @@ class TemporalClueScenario:
                         ),
                     ),
                     bias=0.1,
+                    tags=["indirect", "character_move", "motive"],
                 )
             yield TemporalClue(
                 description=f"{character} moved from the {character_move.from_room} to the {character_move.to_room} at {character_move.time}",
@@ -1329,6 +1489,7 @@ class TemporalClueScenario:
                     model.character_time_room_vars[m.character][m.time][m.to_room],
                 ),
                 bias=0.1,
+                tags=["indirect", "character_move"],
             )
 
     def weapon_move_clues(self) -> Iterable[TemporalClue]:
@@ -1343,7 +1504,8 @@ class TemporalClueScenario:
                         model.weapon_time_room_vars[w.weapon][pt][w.from_room],
                         model.weapon_time_room_vars[w.weapon][w.time][w.to_room],
                     ),
-                    bias=0.3,
+                    bias=0.35,
+                    tags=["indirect", "weapon_move", "murderer"],
                 )
             if weapon_move.weapon == self.murder_weapon:
                 yield TemporalClue(
@@ -1354,11 +1516,13 @@ class TemporalClueScenario:
                         model.murder_weapon_time_room_var(pt, w.from_room),
                         model.murder_weapon_time_room_var(w.time, w.to_room),
                     ),
-                    bias=0.3,
+                    bias=0.35,
+                    tags=["indirect", "weapon_move", "suspect"],
                 )
             if len(self.motives) > 1:
+                motive = self.suspect_motives[weapon_move.suspect]
                 yield TemporalClue(
-                    description=f"{'The' if self.unique_motives else 'A'} suspect motivated by {self.suspect_motives[weapon_move.suspect]} moved the {weapon_move.weapon} from the {weapon_move.from_room} to the {weapon_move.to_room} at {weapon_move.time}",
+                    description=f"{self.motive_article(motive).capitalize()} suspect motivated by {motive} moved the {weapon_move.weapon} from the {weapon_move.from_room} to the {weapon_move.to_room} at {weapon_move.time}",
                     get_bool_var=lambda model, w=weapon_move, pt=prev_time: model.all(
                         model.motive_time_room_var(
                             self.suspect_motives[w.suspect], pt, w.from_room
@@ -1369,7 +1533,8 @@ class TemporalClueScenario:
                         model.weapon_time_room_vars[w.weapon][pt][w.from_room],
                         model.weapon_time_room_vars[w.weapon][w.time][w.to_room],
                     ),
-                    bias=0.15,
+                    bias=0.2,
+                    tags=["indirect", "weapon_move", "motive"],
                 )
             yield TemporalClue(
                 description=f"{weapon_move.suspect} moved the {weapon_move.weapon} from the {weapon_move.from_room} to the {weapon_move.to_room} at {weapon_move.time}",
@@ -1379,21 +1544,25 @@ class TemporalClueScenario:
                     model.weapon_time_room_vars[w.weapon][pt][w.from_room],
                     model.weapon_time_room_vars[w.weapon][w.time][w.to_room],
                 ),
-                bias=0.15,
+                bias=0.2,
+                tags=["indirect", "weapon_move"],
             )
 
-    def spatial_relation_clues(self) -> Iterable[TemporalClue]:
+    def spatial_relation_clues(self, num_clues: int = 10) -> Iterable[TemporalClue]:
         """Generates clues based on spatial relationships between pieces at the same time."""
-        for _ in range(10):
+        for _ in range(num_clues):
             time = random.choice(self.times)
-            (room1, pieces1), (room2, pieces2) = random.sample(
-                list(
-                    (room, pieces)
-                    for room, pieces in self.time_room_pieces[time].items()
-                    if pieces
-                ),
-                k=2,
-            )
+            try:
+                (room1, pieces1), (room2, pieces2) = random.sample(
+                    list(
+                        (room, pieces)
+                        for room, pieces in self.time_room_pieces[time].items()
+                        if pieces
+                    ),
+                    k=2,
+                )
+            except ValueError:
+                continue
             piece1, piece2 = random.choice(list(pieces1)), random.choice(list(pieces2))
             coords1, coords2 = self.room_coords[room1], self.room_coords[room2]
             dx = coords1[0] - coords2[0]
@@ -1465,7 +1634,8 @@ class TemporalClueScenario:
                     ),
                     value=1,
                 ),
-                bias=0.1,
+                bias=0.2,
+                tags=["indirect", "spatial_relation"],
             )
 
     def sufficient_clues(self, model: TemporalClueCpModel, debug: bool = False) -> bool:

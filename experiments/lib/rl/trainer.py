@@ -386,7 +386,7 @@ class Trainer:
             episodes.append(episode)
             samples = self.eval_samples_per_episode[split]
             task = asyncio.create_task(
-                episode.sample_completions_v2(
+                episode.sample_completions(
                     completion_sampler,
                     tokenizer=self.tokenizer,
                     num_parents=1,
@@ -520,7 +520,7 @@ class Trainer:
             )
         completion_sampler = await self.get_completion_sampler()
         for iteration in range(self.explore_options.iterations):
-            await episode.sample_completions_v2(
+            await episode.sample_completions(
                 completion_sampler=completion_sampler,
                 tokenizer=self.tokenizer,
                 num_parents=self.explore_options.num_parents,

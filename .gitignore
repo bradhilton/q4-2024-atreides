@@ -7,6 +7,7 @@ __pycache__/
 experiments/.neptune
 experiments/data/*
 !experiments/data/chain-of-thought-examples.json
+!experiments/data/temporal-clue-puzzles.json
 experiments/logs
 experiments/models
 experiments/runs
