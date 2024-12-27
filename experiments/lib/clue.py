@@ -811,8 +811,7 @@ def new_episode_data(
     )(return_first_solver_as_winner).get_prompt_and_follow_up_and_solution()
     return EpisodeData(prompt=prompt, follow_up=follow_up, solution=solution)
 
-
-with open("./data/chain-of-thought-examples.json") as f:
+with open(__file__.split("/lib")[0] + "/data/chain-of-thought-examples.json") as f:
     chain_of_thought_examples: list[dict[str, str]] = json.load(f)
 
 

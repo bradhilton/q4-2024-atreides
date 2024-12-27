@@ -52,7 +52,7 @@ Episodes = Union[
 class Eval:
     name: str
     episodes: Episodes
-    patience: float = 30.0
+    patience: float = 60.0
     samples_per_episode: int = 1
     sampling_kwargs: Optional[SamplingKwargs] = None
 
