@@ -49,6 +49,15 @@ Episodes = Union[
 
 
 @dataclass
+class Eval:
+    name: str
+    episodes: Episodes
+    patience: float = 30.0
+    samples_per_episode: int = 1
+    sampling_kwargs: Optional[SamplingKwargs] = None
+
+
+@dataclass
 class ExploreOptions:
     """
     During the exploration step, the trainer will sample completions for each episode `iterations` times. The
@@ -148,10 +157,7 @@ class Trainer:
         train_episodes: Episodes,
         episodes_per_iteration: Optional[int] = None,
         max_mask_sequence_batch_size: Optional[int] = None,
-        test_episodes: Optional[Episodes] = None,
-        test_patience: float = 5.0,
-        test_samples_per_episode: int = 1,
-        test_sampling_kwargs: Optional[SamplingKwargs] = None,
+        evals: Optional[Iterable[Eval]] = None,
         torchrun_kwargs: Optional[dict[str, Any]] = None,
         tune_episode_sample_fraction: float = 1.0,
         tune_model: Callable[[], TransformerDecoder],
@@ -160,10 +166,6 @@ class Trainer:
         tune_run: bool = True,
         tune_run_env: Optional[dict[str, str]] = None,
         tune_sequence_length: int = 8192,
-        val_episodes: Optional[Episodes] = None,
-        val_patience: float = 5.0,
-        val_samples_per_episode: int = 1,
-        val_sampling_kwargs: Optional[SamplingKwargs] = None,
         vllm_config: Optional[vLLMConfig] = None,
         wandb_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
@@ -209,28 +211,12 @@ class Trainer:
         self.max_mask_sequence_batch_size = max_mask_sequence_batch_size or max(
             32768 // tune_sequence_length, 1
         )
-        self.eval_entropies: dict[str, dict[str, float]] = {"val": {}, "test": {}}
-        self.eval_episodes = {
-            "val": val_episodes,
-            "test": test_episodes,
+        self.evals = {eval.name: eval for eval in evals or []}
+        self.eval_results: dict[str, dict[str, dict[str, Any]]] = {
+            eval.name: {} for eval in self.evals.values()
         }
-        self.eval_exceptions = {
-            "val": [],
-            "test": [],
-        }
-        self.eval_patience = {
-            "val": val_patience,
-            "test": test_patience,
-        }
-        self.eval_samples_per_episode = {
-            "val": val_samples_per_episode,
-            "test": test_samples_per_episode,
-        }
-        self.eval_sampling_kwargs = {
-            "val": val_sampling_kwargs,
-            "test": test_sampling_kwargs,
-        }
-        self.eval_scores: dict[str, dict[str, float]] = {"val": {}, "test": {}}
+        self.eval_episodes = {eval.name: eval.episodes for eval in self.evals.values()}
+        self.eval_exceptions = {eval.name: [] for eval in self.evals.values()}
         self.explore_results: list[ExploreResult] = []
         self.torchrun_kwargs = torchrun_kwargs or (
             {
@@ -270,24 +256,43 @@ class Trainer:
     def model(self) -> str:
         return self.models[-1]
 
-    async def train(
-        self, iterations: int, test: bool = False, verbosity: Verbosity = 2
-    ) -> None:
+    async def train(self, iterations: int, verbosity: Verbosity = 2) -> None:
         for _ in range(iterations):
-            _, result = await asyncio.gather(
-                self.eval("val", 0, return_exceptions=True, verbosity=verbosity),
-                self.explore(1, return_exceptions=True, verbosity=verbosity),
+            results = await asyncio.gather(
+                *(
+                    self.eval(
+                        eval_name,
+                        pbar_position,
+                        return_exceptions=True,
+                        verbosity=verbosity,
+                    )
+                    for pbar_position, eval_name in enumerate(self.evals)
+                ),
+                self.explore(
+                    pbar_position=len(self.evals),
+                    return_exceptions=True,
+                    verbosity=verbosity,
+                ),
             )
-            await self.tune(result, verbosity=verbosity)
-        _, _ = await asyncio.gather(
-            self.eval("val", 0, return_exceptions=True, verbosity=verbosity),
-            self.eval("test", 1, verbosity=verbosity) if test else asyncio.sleep(0),
+            explore_result = results[-1]
+            assert isinstance(explore_result, ExploreResult)
+            await self.tune(explore_result, verbosity=verbosity)
+        _ = await asyncio.gather(
+            *(
+                self.eval(
+                    eval_name,
+                    pbar_position,
+                    return_exceptions=True,
+                    verbosity=verbosity,
+                )
+                for pbar_position, eval_name in enumerate(self.evals)
+            )
         )
 
     @overload
     async def eval(
         self,
-        split: Literal["val", "test"],
+        eval_name: str,
         pbar_position: Optional[int] = None,
         *,
         return_exceptions: Literal[False] = False,
@@ -297,7 +302,7 @@ class Trainer:
     @overload
     async def eval(
         self,
-        split: Literal["val", "test"],
+        eval_name: str,
         pbar_position: Optional[int] = None,
         *,
         return_exceptions: Literal[True] = True,
@@ -306,20 +311,20 @@ class Trainer:
 
     async def eval(
         self,
-        split: Literal["val", "test"],
+        eval_name: str,
         pbar_position: Optional[int] = None,
         *,
         return_exceptions: bool = True,
         verbosity: Verbosity = 2,
     ) -> Union[Optional[float], tuple[Optional[float], list[BaseException]]]:
-        if self.eval_episodes[split] is None:
+        if self.eval_episodes[eval_name] is None:
             if return_exceptions:
                 return None, []
             return None
         completion_sampler = await self.get_completion_sampler(verbosity=verbosity)
         pbar = self.tqdm(
-            desc=split,
-            total=getattr(self.eval_episodes[split], "__len__", lambda: None)(),
+            desc=eval_name,
+            total=getattr(self.eval_episodes[eval_name], "__len__", lambda: None)(),
             unit="episode",
             dynamic_ncols=True,
             position=pbar_position,
@@ -330,7 +335,7 @@ class Trainer:
         exceptions: list[BaseException] = []
 
         def num_episodes_with_model_completions() -> int:
-            return max(
+            return (
                 sum(
                     1
                     for episode in episodes
@@ -338,14 +343,41 @@ class Trainer:
                         child.model == self.model
                         for child in episode.completion.children
                     )
-                ),
-                1,
+                )
+                or 1
             )
 
-        def get_score() -> float:
+        def num_model_completions() -> int:
+            return (
+                sum(
+                    sum(1 for _ in episode.completion.leaves(model=self.model))
+                    for episode in episodes
+                )
+                or 1
+            )
+
+        def get_avg_score() -> float:
             return (
                 sum(
                     episode.completion.value(cache=True, model=self.model)
+                    for episode in episodes
+                )
+                / num_episodes_with_model_completions()
+            )
+
+        def get_max_score() -> float:
+            return (
+                sum(
+                    max(
+                        (
+                            sum(
+                                completion.reward
+                                for completion in leaf.ancestors(including_self=True)
+                            )
+                            for leaf in episode.completion.leaves(model=self.model)
+                        ),
+                        default=0,
+                    )
                     for episode in episodes
                 )
                 / num_episodes_with_model_completions()
@@ -358,7 +390,17 @@ class Trainer:
                     for episode in episodes
                     for leaf in episode.completion.leaves(model=self.model)
                 )
-                / num_episodes_with_model_completions()
+                / num_model_completions()
+            )
+
+        def get_avg_tokens() -> int:
+            return round(
+                sum(
+                    leaf.all_num_token_logprobs()
+                    for episode in episodes
+                    for leaf in episode.completion.leaves(model=self.model)
+                )
+                / num_model_completions()
             )
 
         def done_callback(task: asyncio.Task[bool]) -> None:
@@ -368,14 +410,18 @@ class Trainer:
             except Exception as exception:
                 exceptions.append(exception)
             pbar.set_postfix(
-                avg=get_score(), entropy=get_entropy(), exceptions=len(exceptions)
+                avg=get_avg_score(),
+                max=get_max_score(),
+                entropy=get_entropy(),
+                tokens=get_avg_tokens(),
+                exceptions=len(exceptions),
             )
 
-        sampling_kwargs = (self.eval_sampling_kwargs[split] or {}).copy()
+        sampling_kwargs = (self.evals[eval_name].sampling_kwargs or {}).copy()
         sampling_kwargs["top_logprobs"] = 20
 
         async for episode in iter(
-            self.eval_episodes[split] or (),
+            self.eval_episodes[eval_name] or (),
         ):
             if isinstance(episode, BaseException):
                 if return_exceptions:
@@ -384,7 +430,7 @@ class Trainer:
                 else:
                     raise episode
             episodes.append(episode)
-            samples = self.eval_samples_per_episode[split]
+            samples = self.evals[eval_name].samples_per_episode
             task = asyncio.create_task(
                 episode.sample_completions(
                     completion_sampler,
@@ -401,16 +447,16 @@ class Trainer:
             await asyncio.sleep(1e-6)
         pbar.total = len(episodes)
         pbar.refresh()
-        self.eval_episodes[split] = episodes
+        self.eval_episodes[eval_name] = episodes
         for future in asyncio.as_completed(tasks):
             remaining_episodes = pbar.total - pbar.n
-            patience = self.eval_patience[split] * remaining_episodes
+            patience = self.evals[eval_name].patience * remaining_episodes
             try:
                 await asyncio.wait_for(future, timeout=patience)
             except asyncio.TimeoutError:
                 if verbosity > 0:
                     print(
-                        f"Early stopping {split} evaluation due to expired patience ({remaining_episodes} remaining episodes x {self.eval_patience[split]} patience per episode = {patience} seconds)"
+                        f"Early stopping {eval_name} evaluation due to expired patience ({remaining_episodes} remaining episodes x {self.evals[eval_name].patience} patience per episode = {patience} seconds)"
                     )
                 for task in tasks:
                     task.cancel()
@@ -421,16 +467,30 @@ class Trainer:
                 else:
                     raise exception
         pbar.close()
-        score = get_score()
-        entropy = get_entropy()
-        self.eval_scores[split][self.model] = score
-        self.eval_entropies[split][self.model] = entropy
-        self.eval_exceptions[split].extend(exceptions)
-        if self._wandb_run:
-            wandb.log({f"{split}": score, f"{split}_entropy": entropy})
+        avg_score = get_avg_score()
+        if self.model not in self.eval_results[eval_name]:
+            max_score = get_max_score()
+            entropy = get_entropy()
+            avg_tokens = get_avg_tokens()
+            self.eval_results[eval_name][self.model] = {
+                "avg": avg_score,
+                "max": max_score,
+                "entropy": entropy,
+                "tokens": avg_tokens,
+            }
+            if self._wandb_run:
+                wandb.log(
+                    {
+                        f"{eval_name}/avg": avg_score,
+                        f"{eval_name}/max": max_score,
+                        f"{eval_name}/entropy": entropy,
+                        f"{eval_name}/tokens": avg_tokens,
+                    }
+                )
+        self.eval_exceptions[eval_name].extend(exceptions)
         if return_exceptions:
-            return score, exceptions
-        return score
+            return avg_score, exceptions
+        return avg_score
 
     async def explore(
         self,

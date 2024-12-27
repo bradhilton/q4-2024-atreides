@@ -1,11 +1,18 @@
+import asyncio
+import fastapi
+import httpx
 from itertools import chain, cycle
+import json
 import numpy as np
 from ortools.sat.python import cp_model
 import pandas as pd
+from pydantic import BaseModel
 import random
-from typing import Iterable, Literal, Optional, Union
+import re
+from typing import Any, Iterable, Literal, Optional, Union
 
 from .data import player_names
+from .rl.episode import Episode, EpisodeCompletion
 
 
 class Clue:
@@ -67,7 +74,7 @@ class Clue:
         "Fear",
         "Ambition",
         "Betrayal",
-        "Pride"
+        "Pride",
     ]
 
     @staticmethod
@@ -785,9 +792,6 @@ def get_easy_game(return_first_solver_as_winner: Optional[bool] = None) -> Clue:
     return game
 
 
-import fastapi
-from pydantic import BaseModel
-
 app = fastapi.FastAPI()
 
 
@@ -806,3 +810,113 @@ def new_episode_data(
         get_easy_game if difficulty == "easy" else get_variable_difficulty_game
     )(return_first_solver_as_winner).get_prompt_and_follow_up_and_solution()
     return EpisodeData(prompt=prompt, follow_up=follow_up, solution=solution)
+
+
+with open("./data/chain-of-thought-examples.json") as f:
+    chain_of_thought_examples: list[dict[str, str]] = json.load(f)
+
+
+client = httpx.AsyncClient(
+    timeout=httpx.Timeout(5.0, read=30.0),
+    limits=httpx.Limits(max_connections=512, max_keepalive_connections=512),
+)
+
+
+async def sample_random_episode(
+    difficulty: Literal["easy", "variable"] = "variable",
+    example_probability: float = 0.0,
+    max_prompt_characters: int = 8192,
+    reward_follow_up_completion: bool = True,
+    return_first_solver_as_winner: Optional[bool] = None,
+    length_penalty: float = 0.0,
+) -> Episode:
+    while True:
+        params: dict[str, Any] = {
+            "difficulty": difficulty,
+        }
+        if return_first_solver_as_winner is not None:
+            params["return_first_solver_as_winner"] = return_first_solver_as_winner
+        try:
+            response = await client.get(
+                "http://0.0.0.0:2218/new-episode-data",
+                params=params,
+            )
+            response.raise_for_status()
+        except httpx.TimeoutException:
+            continue
+        result = response.json()
+        prompt = result["prompt"]
+        follow_up = result["follow_up"]
+        solution = result["solution"]
+        if len(prompt) <= max_prompt_characters:
+            break
+
+    async def reward_completion(completion: EpisodeCompletion) -> EpisodeCompletion:
+        if len(completion.messages) == 2:
+            follow_up_completion = await completion.follow_up(
+                messages=[
+                    {"role": "user", "content": follow_up},
+                ],
+                max_tokens=10
+                + len("\n".join(f"{key}: {value}" for key, value in solution.items()))
+                // 2,
+            )
+        else:
+            follow_up_completion = completion
+        answer = follow_up_completion.last_assistant_message.get("content")
+        assert isinstance(answer, str)
+        if reward_follow_up_completion:
+            completion = follow_up_completion
+        completion.reward = sum(
+            [
+                bool(
+                    # Find first match of key followed by colon and capture following text
+                    (
+                        match := re.search(
+                            rf"{key}: ([A-Za-z \.:-]+)",
+                            answer,
+                            re.IGNORECASE,
+                        )
+                    )
+                    # Check if captured group matches expected value
+                    and match.group(1).strip().lower() == value.strip().lower()
+                )
+                for key, value in solution.items()
+            ]
+        ) / len(solution)
+        completion.reward -= (
+            completion.all_absent_stop_tokens
+            / (3 if reward_follow_up_completion else 2)
+            / len(solution)
+        )
+        completion.reward -= (
+            completion.completion_tokens
+            / (len(prompt) + len(solution) * 10)
+            * length_penalty
+        )
+        return completion
+
+    async def on_sample(completions: list[EpisodeCompletion]) -> None:
+        for completion in await asyncio.gather(
+            *[reward_completion(completion) for completion in completions]
+        ):
+            completion.commit()
+
+    example = random.choice(chain_of_thought_examples)
+
+    return Episode(
+        messages=[{"role": "user", "content": prompt}],
+        examples=lambda: (
+            [
+                {"role": "user", "content": example["prompt"]},
+                {
+                    "role": "assistant",
+                    "content": example["chain_of_thought"]
+                    + (example["answer"] and f"\n\n---\n\n{example['answer']}"),
+                },
+            ]
+            if random.random() < example_probability
+            else []
+        ),
+        on_sample=on_sample,
+    )
