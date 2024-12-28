@@ -78,10 +78,28 @@ class ExploreResult:
         repeat_counts = mask.sum() // completion.reference_logprobs.size(0)
         tensors["reference_logprobs"][mask] = completion.reference_logprobs.repeat(repeat_counts)  # type: ignore
 
+    def _get_avg_max_score(self) -> float:
+        if not self.episodes:
+            return 0.0
+        return sum(
+            max(
+                (
+                    sum(
+                        completion.reward
+                        for completion in leaf.ancestors(including_self=True)
+                    )
+                    for leaf in episode.completion.leaves(model=self.model)
+                ),
+                default=0,
+            )
+            for episode in self.episodes
+        ) / len(self.episodes)
+
     def _update_pbar_postfix(self) -> None:
         self.pbar.set_postfix(
             completed=len(self.episodes),
             exceptions=len(self.exceptions),
+            max=round(self._get_avg_max_score(), 3),
         )
 
     def _pack_episode(self, episode: Episode) -> None:
