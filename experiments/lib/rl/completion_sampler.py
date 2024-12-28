@@ -2,6 +2,7 @@ from aioitertools.helpers import maybe_await
 import asyncio
 import bisect
 from collections import Counter
+from langfuse.decorators import observe
 from openai import AsyncOpenAI
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
@@ -138,6 +139,7 @@ class CompletionSampler:
         self.average_completion_tokens = 0.0
         self.num_completions = 0
 
+    @observe
     async def sample_completions(
         self,
         parent: Completion,
