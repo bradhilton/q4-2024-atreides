@@ -3,7 +3,6 @@ import copy
 from dataclasses import dataclass
 import httpx
 import json
-from openai import AsyncOpenAI
 from openai import DefaultAsyncHttpxClient
 import os
 import random
@@ -27,7 +26,13 @@ from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.utils import FlexibleArgumentParser
 
+from .langfuse import langfuse
 from .utils import read_last_n_lines
+
+if langfuse.enabled:
+    from langfuse.openai import AsyncOpenAI
+else:
+    from openai import AsyncOpenAI
 
 
 async def start_vllm_server(

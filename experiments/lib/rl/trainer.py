@@ -27,6 +27,7 @@ from typing import (
     Literal,
     Optional,
     overload,
+    Protocol,
     Union,
 )
 import wandb
@@ -55,6 +56,17 @@ class Eval:
     patience: float = 60.0
     samples_per_episode: int = 1
     sampling_kwargs: Optional[SamplingKwargs] = None
+
+
+class ExploreImpl(Protocol):
+    async def __call__(
+        self,
+        completion_sampler: CompletionSampler,
+        tokenizer: Tokenizer,
+        ready_episodes: asyncio.Queue[Episode],
+        done_episodes: asyncio.Queue[Episode | BaseException],
+        update_progress: Callable[[float], None],
+    ) -> None: ...
 
 
 @dataclass
@@ -149,6 +161,7 @@ class Trainer:
         base_model_checkpoint_files: Optional[list[str]] = None,
         output_dir: str,
         explore_options: ExploreOptions,
+        explore_impl: ExploreImpl,
         reference_clients: Optional[AnyIterable[AsyncOpenAI]] = None,
         reference_model: Optional[str] = None,
         reference_model_checkpoint_files: Optional[list[str]] = None,
@@ -192,6 +205,7 @@ class Trainer:
             print(f"Resuming from {self.model}")
         self.base_model_checkpoint_files = base_model_checkpoint_files
         self.explore_options = explore_options
+        self.explore_impl = explore_impl
         self.reference_clients = (
             ait.cycle(reference_clients) if reference_clients else None
         )
@@ -499,7 +513,7 @@ class Trainer:
         return_exceptions: bool = True,
         verbosity: Verbosity = 2,
     ) -> ExploreResult:
-        await self.get_completion_sampler(verbosity=verbosity)
+        completion_sampler = await self.get_completion_sampler(verbosity=verbosity)
         pbar = self.tqdm(
             desc="explore",
             total=self.episodes_per_iteration,
@@ -526,8 +540,27 @@ class Trainer:
                 else None
             ),
         )
-        async for priority, episode in iter(
-            aenumerate(ait.islice(self._train_iterator, self.episodes_per_iteration))
+        ready_episodes = asyncio.Queue[Episode]()
+        done_episodes = asyncio.Queue[Episode | BaseException]()
+        explore_task = asyncio.create_task(
+            self.explore_impl(
+                completion_sampler,
+                self.tokenizer,
+                ready_episodes,
+                done_episodes,
+                lambda progress: pbar.update(progress),  # type: ignore
+            )
+        )
+
+        async def put_ready_episode(episode: Episode) -> Episode:
+            await ready_episodes.put(episode)
+            episode_or_exception = await done_episodes.get()
+            if isinstance(episode_or_exception, BaseException):
+                raise episode_or_exception
+            return episode_or_exception
+
+        async for episode in ait.islice(
+            self._train_iterator, self.episodes_per_iteration
         ):
             if isinstance(episode, BaseException):
                 if return_exceptions:
@@ -542,18 +575,16 @@ class Trainer:
             ):
                 self._train_iterator = ait.chain([episode], self._train_iterator)
                 break
-            task = asyncio.create_task(self._explore_episode(episode, pbar, priority))
+            task = asyncio.create_task(put_ready_episode(episode))
             task.add_done_callback(result.done_callback)
             tasks.append(task)
-            if self.episodes_per_iteration is None:
-                self.episodes_per_iteration = len(tasks)
-                pbar.total = len(tasks)
-                pbar.refresh()
             await asyncio.sleep(1e-6)  # yield to other tasks
+        if self.episodes_per_iteration is None:
+            self.episodes_per_iteration = len(tasks)
+            pbar.total = len(tasks)
+            pbar.refresh()
         for future in asyncio.as_completed(tasks):
-            remaining_episodes = self.explore_options.num_samples * (
-                len(tasks) - len(result.episodes)
-            )
+            remaining_episodes = len(tasks) - len(result.episodes)
             patience = self.explore_options.patience * remaining_episodes
             try:
                 await asyncio.wait_for(future, timeout=patience)
@@ -567,73 +598,75 @@ class Trainer:
                 break
             except BaseException as exception:
                 if not return_exceptions:
+                    explore_task.cancel()
                     raise exception
+        explore_task.cancel()
         self.explore_results.append(result)
         return result.completed()
 
-    async def _explore_episode(
-        self, episode: Episode, pbar: tqdm, priority: int
-    ) -> Episode:
-        if episode in self._substitute_episodes:
-            return await self._explore_episode(
-                self._substitute_episodes[episode], pbar, priority
-            )
-        completion_sampler = await self.get_completion_sampler()
-        for iteration in range(self.explore_options.iterations):
-            await episode.sample_completions(
-                completion_sampler=completion_sampler,
-                tokenizer=self.tokenizer,
-                num_parents=self.explore_options.num_parents,
-                branch_factor=self.explore_options.branch_factor,
-                get_recovery_pattern=self.explore_options.get_recovery_pattern,
-                max_splits_per_completion=self.explore_options.max_split_points
-                or self.explore_options.num_parents,
-                priority=priority,
-                sample_probability_power=self.explore_options.get_sample_probability_power(),
-                sampling_kwargs=self.explore_options.sampling_kwargs,
-                split_by=self.explore_options.split_method,
-                split_separators=self.explore_options.split_separators,
-            )
-            if iteration == 0 and all(
-                c.advantage(cache=True, model=self.model) == 0
-                for c in episode.completion.children
-                if c.model == self.model
-            ):
-                if (
-                    episode.get_easier_episode
-                    and episode.min_value is not None
-                    and episode.completion.value(cache=True, model=self.model)
-                    <= episode.min_value
-                ):
-                    substitute = await maybe_await(episode.get_easier_episode())
-                elif (
-                    episode.get_harder_episode
-                    and episode.max_value is not None
-                    and episode.completion.value(cache=True, model=self.model)
-                    >= episode.max_value
-                ):
-                    substitute = await maybe_await(episode.get_harder_episode())
-                elif episode.get_similar_episode:
-                    substitute = await maybe_await(episode.get_similar_episode())
-                else:
-                    continue
-                self._substitute_episodes[episode] = substitute
-                return await self._explore_episode(substitute, pbar, priority)
-            pbar.update(
-                1
-                / self.explore_options.iterations
-                / (
-                    2
-                    if self.reference_clients and self.reference_model != self.model
-                    else 1
-                )
-            )
-        if self.reference_clients and self.reference_model != self.model:
-            await self._get_episode_reference_logprobs(
-                episode, client=await anext(self.reference_clients)
-            )
-            pbar.update(0.5)
-        return episode
+    # async def _explore_episode(
+    #     self, episode: Episode, pbar: tqdm, priority: int
+    # ) -> Episode:
+    #     if episode in self._substitute_episodes:
+    #         return await self._explore_episode(
+    #             self._substitute_episodes[episode], pbar, priority
+    #         )
+    #     completion_sampler = await self.get_completion_sampler()
+    #     for iteration in range(self.explore_options.iterations):
+    #         await episode.sample_completions(
+    #             completion_sampler=completion_sampler,
+    #             tokenizer=self.tokenizer,
+    #             num_parents=self.explore_options.num_parents,
+    #             branch_factor=self.explore_options.branch_factor,
+    #             get_recovery_pattern=self.explore_options.get_recovery_pattern,
+    #             max_splits_per_completion=self.explore_options.max_split_points
+    #             or self.explore_options.num_parents,
+    #             priority=priority,
+    #             sample_probability_power=self.explore_options.get_sample_probability_power(),
+    #             sampling_kwargs=self.explore_options.sampling_kwargs,
+    #             split_by=self.explore_options.split_method,
+    #             split_separators=self.explore_options.split_separators,
+    #         )
+    #         if iteration == 0 and all(
+    #             c.advantage(cache=True, model=self.model) == 0
+    #             for c in episode.completion.children
+    #             if c.model == self.model
+    #         ):
+    #             if (
+    #                 episode.get_easier_episode
+    #                 and episode.min_value is not None
+    #                 and episode.completion.value(cache=True, model=self.model)
+    #                 <= episode.min_value
+    #             ):
+    #                 substitute = await maybe_await(episode.get_easier_episode())
+    #             elif (
+    #                 episode.get_harder_episode
+    #                 and episode.max_value is not None
+    #                 and episode.completion.value(cache=True, model=self.model)
+    #                 >= episode.max_value
+    #             ):
+    #                 substitute = await maybe_await(episode.get_harder_episode())
+    #             elif episode.get_similar_episode:
+    #                 substitute = await maybe_await(episode.get_similar_episode())
+    #             else:
+    #                 continue
+    #             self._substitute_episodes[episode] = substitute
+    #             return await self._explore_episode(substitute, pbar, priority)
+    #         pbar.update(
+    #             1
+    #             / self.explore_options.iterations
+    #             / (
+    #                 2
+    #                 if self.reference_clients and self.reference_model != self.model
+    #                 else 1
+    #             )
+    #         )
+    #     if self.reference_clients and self.reference_model != self.model:
+    #         await self._get_episode_reference_logprobs(
+    #             episode, client=await anext(self.reference_clients)
+    #         )
+    #         pbar.update(0.5)
+    #     return episode
 
     async def _get_episode_reference_logprobs(
         self,
@@ -677,21 +710,21 @@ class Trainer:
                 reference_logprobs[count:],
             )
 
-    def tensors(self, episodes: list[Episode]) -> PackedTensors:
-        return packed_tensors(
-            episodes,
-            model=self.model,
-            sample_probability_power=self.explore_options.get_sample_probability_power(),
-            sequence_length=self.tune_sequence_length,
-            trajectories_per_episode=(
-                int(
-                    self.explore_options.num_samples * self.tune_episode_sample_fraction
-                )
-                if self.tune_episode_sample_fraction < 1.0
-                else None
-            ),
-            tokenizer=self.tokenizer,
-        )
+    # def tensors(self, episodes: list[Episode]) -> PackedTensors:
+    #     return packed_tensors(
+    #         episodes,
+    #         model=self.model,
+    #         sample_probability_power=self.explore_options.get_sample_probability_power(),
+    #         sequence_length=self.tune_sequence_length,
+    #         trajectories_per_episode=(
+    #             int(
+    #                 self.explore_options.num_samples * self.tune_episode_sample_fraction
+    #             )
+    #             if self.tune_episode_sample_fraction < 1.0
+    #             else None
+    #         ),
+    #         tokenizer=self.tokenizer,
+    #     )
 
     async def tune(self, result: ExploreResult, *, verbosity: Verbosity = 2) -> None:
         await self.stop_vllms()
@@ -966,13 +999,13 @@ class Trainer:
             self._vllm_task = None
             raise exception
 
-    async def stop_vllms(self) -> None:
+    async def stop_vllms(self, *, timeout: float = 1.0) -> None:
         if self._vllm_task:
             try:
                 vllms = await self._vllm_task
                 for vllm in vllms:
                     vllm.process.terminate()
-                    await vllm.process.wait()
+                    await asyncio.wait_for(vllm.process.wait(), timeout=timeout)
             except BaseException as exception:
                 print(type(exception), exception)
             finally:
