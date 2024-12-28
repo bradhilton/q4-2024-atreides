@@ -508,7 +508,7 @@ class Trainer:
             position=pbar_position,
             disable=not verbosity,
         )
-        pbar.set_postfix(completed=0, exceptions=0)
+        pbar.set_postfix(completed=0, exceptions=0, max=0.0)
         tasks: list[asyncio.Task[Episode]] = []
         result = ExploreResult(
             pbar=pbar,
