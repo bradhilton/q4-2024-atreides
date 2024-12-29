@@ -162,6 +162,7 @@ class Trainer:
         output_dir: str,
         explore_options: ExploreOptions,
         explore_impl: ExploreImpl,
+        force_terminate_vllms: bool = False,
         reference_clients: Optional[AnyIterable[AsyncOpenAI]] = None,
         reference_model: Optional[str] = None,
         reference_model_checkpoint_files: Optional[list[str]] = None,
@@ -206,6 +207,7 @@ class Trainer:
         self.base_model_checkpoint_files = base_model_checkpoint_files
         self.explore_options = explore_options
         self.explore_impl = explore_impl
+        self.force_terminate_vllms = force_terminate_vllms
         self.reference_clients = (
             ait.cycle(reference_clients) if reference_clients else None
         )
@@ -999,14 +1001,23 @@ class Trainer:
             self._vllm_task = None
             raise exception
 
-    async def stop_vllms(self, *, timeout: float = 1.0) -> None:
+    async def stop_vllms(self, *, timeout: float = 5.0) -> None:
         if self._vllm_task:
             try:
                 vllms = await self._vllm_task
                 for vllm in vllms:
                     vllm.process.terminate()
+                    # Forcefully terminate any remaining GPU processes
+                    if self.force_terminate_vllms:
+                        os.system(
+                            "nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -r kill -9"
+                        )
                     await asyncio.wait_for(vllm.process.wait(), timeout=timeout)
             except BaseException as exception:
-                print(type(exception), exception)
+                print(
+                    "Experienced the following exception while stopping vLLM servers:",
+                    type(exception),
+                    exception,
+                )
             finally:
                 self._vllm_task = None
