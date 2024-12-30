@@ -263,6 +263,9 @@ class Completion:
         for child in self.children:
             yield from child.leaves(model=model)
 
+    def depth(self) -> int:
+        return 1 + self.parent.depth() if self.parent else 0
+
     def depths(self, depth: int = 0, model: Optional[str] = None) -> Iterable[int]:
         if self.matches_model(model):
             yield depth
@@ -761,7 +764,7 @@ class Completion:
             weights or self._split_weights(by, separators=separators, cache=cache)
         )
         assert (
-            separators is None or len(weights) == self.num_token_logprobs()
+            not separators or len(weights) == self.num_token_logprobs()
         ), "Number of weights does not match number of tokens."
         if len(weights) < 2:
             return
@@ -775,7 +778,7 @@ class Completion:
                 by=by, at=split_points, separators=separators, cache=cache
             )
         elif split == len(weights):
-            # Cannot split at end of completion, so return early
+            # Cannot split at the end of the completion, so return early
             return
         assert weights[split] != 0, "Split point has zero weight."
         i = 0
@@ -851,9 +854,7 @@ class Completion:
                 if (
                     separator
                     and n
-                    and (
-                        separators is None or not get_token(token_logprob) in separators
-                    )
+                    and (not separators or not get_token(token_logprob) in separators)
                 ):
                     weights.append(weight)
                     weights.extend([0] * (n - 1))
@@ -865,7 +866,7 @@ class Completion:
                     logprob=lambda x: -x,
                 )[by](token_logprob.logprob)
                 n += 1
-                separator = separators is None or get_token(token_logprob) in separators
+                separator = not separators or get_token(token_logprob) in separators
         if n:
             weights.append(weight)
             weights.extend([0] * (n - 1))
