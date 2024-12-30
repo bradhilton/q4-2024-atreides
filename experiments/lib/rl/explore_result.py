@@ -21,6 +21,7 @@ class ExploreResult:
     pbar: tqdm
     max_mask_sequence_batch_size: int
     model: str
+    advantage_max_weight: float
     sample_probability_power: float
     sequence_length: int
     tensor_dir: str
@@ -124,7 +125,12 @@ class ExploreResult:
         for terminus in possible_termini:
             for terminus in terminus.ancestors(including_self=True):
                 if (
-                    terminus.advantage(cache=True, model=self.model) != 0
+                    terminus.advantage(
+                        cache=True,
+                        model=self.model,
+                        max_weight=self.advantage_max_weight,
+                    )
+                    != 0
                     and terminus.token_count(self.tokenizer, cache=True)
                     <= self.sequence_length
                 ):
@@ -251,7 +257,9 @@ class ExploreResult:
         values[mask] = torch.tensor([value for _ in range(mask.sum())])
         advantages = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
         advantages[mask] = torch.tensor(
-            completion.token_advantages(cache=True, model=self.model)
+            completion.token_advantages(
+                cache=True, model=self.model, max_weight=self.advantage_max_weight
+            )
         )
         logprobs = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
         logprobs[mask] = torch.tensor([logprob for logprob in completion.logprobs()])
@@ -299,7 +307,10 @@ class ExploreResult:
                     )
                     / sequence_occurences[completion]
                 )
-                if completion.advantage(cache=True, model=self.model) != 0
+                if completion.advantage(
+                    cache=True, model=self.model, max_weight=self.advantage_max_weight
+                )
+                != 0
                 else 0
             )
             for completion in total_occurances

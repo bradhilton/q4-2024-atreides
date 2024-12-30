@@ -82,6 +82,9 @@ class ExploreOptions:
 
     branch_factor (int): The number of completions to sample from each parent node.
 
+    advantage_max_weight (float): How much weight to give to the maximum reward-to-go (instead of the Q-value) when
+    computing the advantage.
+
     max_split_points (Optional[int]): The maximum number of points that a completion can be split per
     iteration. If None, completions may be split up to `num_parents` times.
 
@@ -115,6 +118,7 @@ class ExploreOptions:
     iterations: int
     num_parents: int
     branch_factor: int
+    advantage_max_weight: float = 0.0
     max_split_points: Optional[int] = None
     patience: float = 1.0
     recovery_pattern: Optional[Union[str, Callable[[Completion], str]]] = None
@@ -530,6 +534,7 @@ class Trainer:
             pbar=pbar,
             max_mask_sequence_batch_size=self.max_mask_sequence_batch_size,
             model=self.model,
+            advantage_max_weight=self.explore_options.advantage_max_weight,
             sample_probability_power=self.explore_options.get_sample_probability_power(),
             sequence_length=self.tune_sequence_length,
             tensor_dir=self.output_dir + "/tensors",

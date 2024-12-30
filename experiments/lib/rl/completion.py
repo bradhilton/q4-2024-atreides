@@ -81,6 +81,7 @@ class Completion:
         self.fork = fork
         self.reference_logprobs: Optional[torch.Tensor] = None
         self._cached_values: dict[tuple[Optional[str], Optional[bool]], float] = {}
+        self._cached_max_values: dict[Optional[str], float] = {}
         self._cached_sample_weights: dict[tuple[Optional[str], float], float] = {}
         self._cached_tokens_and_mask: Optional[tuple[torch.Tensor, torch.Tensor]] = None
         self._cached_entropy_sum: Optional[float] = None
@@ -104,12 +105,14 @@ class Completion:
         if reward is not None:
             self.reward = reward
             self._cached_values = {}
+            self._cached_max_values = {}
             self._cached_sample_weights = {}
         if not self.parent:
             return
         self.parent.commit()
         self.parent.children.add(self)
         self.parent._cached_values = {}
+        self.parent._cached_max_values = {}
         self.parent._cached_sample_weights = {}
 
     def value(
@@ -145,7 +148,37 @@ class Completion:
             self._cached_values[(model, fork)] = value
         return value
 
-    def advantage(self, cache: bool = False, model: Optional[str] = None) -> float:
+    def max_value(self, cache: bool = False, model: Optional[str] = None) -> float:
+        """
+        Returns the maximum reward-to-go for this completion.
+        """
+        if cache and model in self._cached_max_values:
+            return self._cached_max_values[model]
+        max_value = self.reward + (
+            max(child.max_value(cache=cache, model=model) for child in self.children)
+            if self.children
+            else 0.0
+        )
+        if cache:
+            self._cached_max_values[model] = max_value
+        return max_value
+
+    def weighted_value(
+        self,
+        cache: bool = False,
+        model: Optional[str] = None,
+        max_weight: float = 0.0,
+    ) -> float:
+        return (1 - max_weight) * self.value(
+            cache=cache, model=model
+        ) + max_weight * self.max_value(cache=cache, model=model)
+
+    def advantage(
+        self,
+        cache: bool = False,
+        model: Optional[str] = None,
+        max_weight: float = 0.0,
+    ) -> float:
         """
         Calculates the advantage value for this completion relative to its parent.
 
@@ -163,8 +196,13 @@ class Completion:
         if self.parent is None:
             return 0.0
         return (
-            self.value(cache=cache, model=model)
-            - (self.parent.value(cache=cache, model=model) - self.parent.reward)
+            self.weighted_value(cache=cache, model=model, max_weight=max_weight)
+            - (
+                self.parent.weighted_value(
+                    cache=cache, model=model, max_weight=max_weight
+                )
+                - self.parent.reward
+            )
         ) * self.weight
 
     # def adjustment(self, lambda_: float = 1.0) -> float:
@@ -519,9 +557,9 @@ class Completion:
         )
 
     def token_advantages(
-        self, cache: bool = False, model: Optional[str] = None
+        self, cache: bool = False, model: Optional[str] = None, max_weight: float = 0.0
     ) -> list[float]:
-        advantage = self.advantage(cache=cache, model=model)
+        advantage = self.advantage(cache=cache, model=model, max_weight=max_weight)
         token_logprobs = [
             token_logprob
             for token_logprobs in self._token_logprob_sequences()
