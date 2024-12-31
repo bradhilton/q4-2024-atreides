@@ -534,6 +534,7 @@ class Trainer:
             pbar=pbar,
             max_mask_sequence_batch_size=self.max_mask_sequence_batch_size,
             model=self.model,
+            abs_weighted_sum=200_000.0,
             advantage_max_weight=self.explore_options.advantage_max_weight,
             sample_probability_power=self.explore_options.get_sample_probability_power(),
             sequence_length=self.tune_sequence_length,

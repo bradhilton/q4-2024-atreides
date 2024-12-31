@@ -21,6 +21,7 @@ class ExploreResult:
     pbar: tqdm
     max_mask_sequence_batch_size: int
     model: str
+    abs_weighted_sum: float
     advantage_max_weight: float
     sample_probability_power: float
     sequence_length: int
@@ -331,8 +332,12 @@ class ExploreResult:
 
     def _normalize(self, packed_tensors: PackedTensors, key: str) -> None:
         x = packed_tensors[key][: len(self.sequences)]
+        weights = packed_tensors["weights"][: len(self.sequences)]
         x -= torch.nanmean(x)
-        x /= torch.std(x[~torch.isnan(x)]) or 1.0
+        x /= (
+            torch.sum(torch.abs(x[~torch.isnan(x)] * weights[~torch.isnan(x)]))
+            / self.abs_weighted_sum
+        ) or 1.0
 
     def _sequences_to_tensor(
         self,
