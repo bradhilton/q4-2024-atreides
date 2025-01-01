@@ -10,6 +10,7 @@ experiments/data/*
 !experiments/data/temporal-clue-puzzles.json
 !experiments/data/temporal-clue-puzzles-2.json
 !experiments/data/temporal-clue-puzzles-3.json
+!experiments/data/temporal-clue-puzzles-4.json
 experiments/logs
 experiments/models
 experiments/runs
