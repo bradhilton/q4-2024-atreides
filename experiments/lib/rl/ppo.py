@@ -136,7 +136,10 @@ class PPOLoss(nn.Module):
         exploitation_penalty: float = 0.0,
         use_reference_logprobs: bool = False,
         advantage_coef: float = 0.0,
+        advantage_ratio: bool = False,
+        advantage_regularization: float = 1.0,
         advantage_quantile: Optional[float] = None,
+        advantage_quantile_weight: float = 1.0,
         value_coef: float = 0.0,
         value_quantile: Optional[float] = None,
         entropy_coef: float = 0.01,
@@ -169,7 +172,10 @@ class PPOLoss(nn.Module):
             use_reference_logprobs (bool): If True, uses reference_logprobs instead of
                 logprobs for policy losses. Defaults to False.
             advantage_coef (float): Coefficient for the advantage loss. Defaults to 0.0.
+            advantage_ratio (bool): If True, uses the ratio of the new and old logprobs for the advantage loss. Defaults to False.
+            advantage_regularization (float): Regularization for the advantage loss. Defaults to 1.0.
             advantage_quantile (Optional[float]): Optional quantile to use for (quantile) advantage loss. Defaults to None.
+            advantage_quantile_weight (float): Weight for the quantile advantage loss if advantage_quantile is not None. Defaults to 1.0.
             value_coef (float): Coefficient for the value loss (defaults to 0.0).
             value_quantile (Optional[float]): Optional quantile to use for (quantile) value loss. Defaults to None.
             entropy_coef (float): Coefficient for the entropy bonus to encourage exploration.
@@ -196,7 +202,10 @@ class PPOLoss(nn.Module):
         self.exploitation_penalty = exploitation_penalty
         self.use_reference_logprobs = use_reference_logprobs
         self.advantage_coef = advantage_coef
+        self.advantage_ratio = advantage_ratio
+        self.advantage_regularization = advantage_regularization
         self.advantage_quantile = advantage_quantile
+        self.advantage_quantile_weight = advantage_quantile_weight
         self.value_coef = value_coef
         self.value_quantile = value_quantile
         self.entropy_coef = entropy_coef
@@ -420,23 +429,25 @@ class PPOLoss(nn.Module):
         if self.advantage_coef:
             # Calculate the advantage loss
             # Shape: (num_tokens,)
-            advantage_preds = logits.gather(-1, tokens.unsqueeze(-1)).squeeze(-1)[mask]
+            advantage_preds = new_logprobs
+            if self.advantage_ratio:
+                advantage_preds = advantage_preds - old_logprobs
             if self.normalize_advantage_predictions:
                 advantage_preds = (advantage_preds - advantage_preds.mean()) / (
                     advantage_preds.std() + 1e-8
                 )
+            diff = advantages - self.advantage_regularization * advantage_preds
+            advantage_loss = diff.abs()
             if self.advantage_quantile:
-                diff = advantages - advantage_preds
                 quantile_loss = torch.where(
                     diff > 0,
                     self.advantage_quantile * diff,
                     (1 - self.advantage_quantile) * -diff,
                 )
-                advantage_loss = quantile_loss.mul(weights).sum()
-            else:
                 advantage_loss = (
-                    (advantages - advantage_preds).pow(2).mul(weights).sum()
-                )
+                    1 - self.advantage_quantile_weight
+                ) * advantage_loss + self.advantage_quantile_weight * quantile_loss
+            advantage_loss = advantage_loss.mul(weights).sum()
         else:
             advantage_loss = torch.tensor(0.0, device=logits.device)
 

@@ -1103,6 +1103,7 @@ class TuneRecipe(FTRecipeInterface):
                         per_token_result.tanh_log_policy_loss.item()
                     )
                     reinforce_to_log = per_token_result.reinforce_loss.item()
+                    advantage_to_log = per_token_result.advantage_loss.item()
                     value_to_log = per_token_result.value_loss.item()
                     entropy_to_log = per_token_result.entropy_bonus.item()
                     entropy_target_to_log = per_token_result.entropy_target_loss.item()
@@ -1123,6 +1124,7 @@ class TuneRecipe(FTRecipeInterface):
                         unclipped_policy=f"{unclipped_policy_to_log:.4f}",
                         tanh_log_policy=f"{tanh_log_policy_to_log:.4f}",
                         reinforce=f"{reinforce_to_log:.4f}",
+                        advantage=f"{advantage_to_log:.4f}",
                         value=f"{value_to_log:.4f}",
                         entropy=f"{entropy_to_log:.4f}",
                         entropy_target=f"{entropy_target_to_log:.4f}",
@@ -1145,6 +1147,7 @@ class TuneRecipe(FTRecipeInterface):
                             "unclipped_policy": unclipped_policy_to_log,
                             "tanh_log_policy": tanh_log_policy_to_log,
                             "reinforce": reinforce_to_log,
+                            "advantage": advantage_to_log,
                             "value": value_to_log,
                             "entropy": entropy_to_log,
                             "entropy_target": entropy_target_to_log,
