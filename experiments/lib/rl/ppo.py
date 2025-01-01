@@ -48,6 +48,7 @@ class PPOResult:
     unclipped_policy_weight: torch.Tensor = tensor_field()
     tanh_log_policy_weight: torch.Tensor = tensor_field()
     reinforce_weight: torch.Tensor = tensor_field()
+    advantage_weight: torch.Tensor = tensor_field()
     value_weight: torch.Tensor = tensor_field()
     entropy_weight: torch.Tensor = tensor_field()
     entropy_target_weight: torch.Tensor = tensor_field()
@@ -61,6 +62,7 @@ class PPOResult:
     unclipped_policy_loss: torch.Tensor = tensor_field()
     tanh_log_policy_loss: torch.Tensor = tensor_field()
     reinforce_loss: torch.Tensor = tensor_field()
+    advantage_loss: torch.Tensor = tensor_field()
     value_loss: torch.Tensor = tensor_field()
     entropy_bonus: torch.Tensor = tensor_field()
     entropy_target: torch.Tensor = tensor_field()
@@ -107,6 +109,7 @@ class PPOResult:
             + (self.tanh_log_policy_weight / self.num_tokens)
             * self.tanh_log_policy_loss
             + (self.reinforce_weight / self.num_tokens) * self.reinforce_loss
+            + (self.advantage_weight / self.num_tokens) * self.advantage_loss
             + (self.value_weight / self.num_tokens) * self.value_loss
             - (self.entropy_weight / self.num_tokens) * self.entropy_bonus
             + (self.entropy_target_weight / self.num_tokens) * self.entropy_target_loss
@@ -131,7 +134,10 @@ class PPOLoss(nn.Module):
         clip_epsilon: float = 0.2,
         exploitation_penalty: float = 0.0,
         use_reference_logprobs: bool = False,
+        advantage_coef: float = 0.0,
+        advantage_quantile: Optional[float] = None,
         value_coef: float = 0.0,
+        value_quantile: Optional[float] = None,
         entropy_coef: float = 0.01,
         entropy_target: float = 0.5,
         entropy_target_coef: float = 0.0,
@@ -141,9 +147,10 @@ class PPOLoss(nn.Module):
         weighted_kl_coef: float = 0.0,
         weighted_reverse_kl_coef: float = 0.0,
         weighted_ce_coef: float = 0.0,
+        normalize_advantages: bool = True,
+        normalize_advantage_predictions: bool = True,
         normalize_values: bool = True,
         normalize_value_predictions: bool = True,
-        normalize_advantages: bool = True,
     ):
         """
         Initializes the PPO Loss module.
@@ -159,7 +166,10 @@ class PPOLoss(nn.Module):
                 premature convergence and encourages exploration. Defaults to 0.0.
             use_reference_logprobs (bool): If True, uses reference_logprobs instead of
                 logprobs for policy losses. Defaults to False.
+            advantage_coef (float): Coefficient for the advantage loss. Defaults to 0.0.
+            advantage_quantile (Optional[float]): Optional quantile to use for (quantile) advantage loss. Defaults to None.
             value_coef (float): Coefficient for the value loss (defaults to 0.0).
+            value_quantile (Optional[float]): Optional quantile to use for (quantile) value loss. Defaults to None.
             entropy_coef (float): Coefficient for the entropy bonus to encourage exploration.
             entropy_target (float): Target entropy (defaults to 0.5).
             entropy_target_coef (float): Coefficient for the entropy target loss.
@@ -169,9 +179,10 @@ class PPOLoss(nn.Module):
             weighted_kl_coef (float): Coefficient for the weighted KL divergence penalty.
             weighted_reverse_kl_coef (float): Coefficient for the weighted reverse KL divergence penalty.
             weighted_ce_coef (float): Coefficient for the weighted cross entropy loss.
+            normalize_advantages (bool): Whether to normalize advantages before computing the loss (default True).
+            normalize_advantage_predictions (bool): Whether to normalize advantage predictions before computing the loss (default True).
             normalize_values (bool): Whether to normalize values before computing the loss (default True).
             normalize_value_predictions (bool): Whether to normalize value predictions before computing the loss (default True).
-            normalize_advantages (bool): Whether to normalize advantages before computing the loss (default True).
         """
         super().__init__()
         self.policy_coef = policy_coef
@@ -181,7 +192,10 @@ class PPOLoss(nn.Module):
         self.clip_epsilon = clip_epsilon
         self.exploitation_penalty = exploitation_penalty
         self.use_reference_logprobs = use_reference_logprobs
+        self.advantage_coef = advantage_coef
+        self.advantage_quantile = advantage_quantile
         self.value_coef = value_coef
+        self.value_quantile = value_quantile
         self.entropy_coef = entropy_coef
         self.entropy_target = entropy_target
         self.entropy_target_coef = entropy_target_coef
@@ -191,9 +205,10 @@ class PPOLoss(nn.Module):
         self.weighted_kl_coef = weighted_kl_coef
         self.weighted_reverse_kl_coef = weighted_reverse_kl_coef
         self.weighted_ce_coef = weighted_ce_coef
+        self.normalize_advantages = normalize_advantages
+        self.normalize_advantage_predictions = normalize_advantage_predictions
         self.normalize_values = normalize_values
         self.normalize_value_predictions = normalize_value_predictions
-        self.normalize_advantages = normalize_advantages
 
     def forward(
         self,
@@ -394,6 +409,29 @@ class PPOLoss(nn.Module):
         # Calculate REINFORCE loss
         reinforce_loss = -(new_logprobs * advantages).mul(weights).sum()  # Scalar
 
+        if self.advantage_coef:
+            # Calculate the advantage loss
+            # Shape: (num_tokens,)
+            advantage_preds = logits.gather(-1, tokens.unsqueeze(-1)).squeeze(-1)[mask]
+            if self.normalize_advantage_predictions:
+                advantage_preds = (advantage_preds - advantage_preds.mean()) / (
+                    advantage_preds.std() + 1e-8
+                )
+            if self.advantage_quantile:
+                diff = advantages - advantage_preds
+                quantile_loss = torch.where(
+                    diff > 0,
+                    self.advantage_quantile * diff,
+                    (1 - self.advantage_quantile) * -diff,
+                )
+                advantage_loss = quantile_loss.mul(weights).sum()
+            else:
+                advantage_loss = (
+                    (advantages - advantage_preds).pow(2).mul(weights).sum()
+                )
+        else:
+            advantage_loss = torch.tensor(0.0, device=logits.device)
+
         if self.value_coef:
             # Calculate the value loss
             # Shape: (num_tokens,)
@@ -404,7 +442,16 @@ class PPOLoss(nn.Module):
                 value_preds = (value_preds - value_preds.mean()) / (
                     value_preds.std() + 1e-8
                 )
-            value_loss = (value_preds - values).pow(2).mul(weights).sum()
+            if self.value_quantile:
+                diff = values - value_preds
+                quantile_loss = torch.where(
+                    diff > 0,
+                    self.value_quantile * diff,
+                    (1 - self.value_quantile) * -diff,
+                )
+                value_loss = quantile_loss.mul(weights).sum()
+            else:
+                value_loss = (value_preds - values).pow(2).mul(weights).sum()
         else:
             value_loss = torch.tensor(0.0, device=logits.device)
 
@@ -449,6 +496,7 @@ class PPOLoss(nn.Module):
             unclipped_policy_weight=self.unclipped_policy_coef * num_tokens,
             tanh_log_policy_weight=self.tanh_log_policy_coef * num_tokens,
             reinforce_weight=self.reinforce_coef * num_tokens,
+            advantage_weight=self.advantage_coef * num_tokens,
             value_weight=self.value_coef * num_tokens,
             entropy_weight=self.entropy_coef * num_tokens,
             entropy_target_weight=self.entropy_target_coef * num_tokens,
@@ -462,6 +510,7 @@ class PPOLoss(nn.Module):
             unclipped_policy_loss=unclipped_policy_loss,
             tanh_log_policy_loss=tanh_log_policy_loss,
             reinforce_loss=reinforce_loss,
+            advantage_loss=advantage_loss,
             value_loss=value_loss,
             entropy_bonus=entropy_bonus,
             entropy_target=self.entropy_target * num_tokens,
