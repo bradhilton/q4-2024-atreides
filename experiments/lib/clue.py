@@ -88,6 +88,13 @@ class Clue:
             else pd.date_range(start=start, end=end, freq=freq).time.tolist()
         )
         return [time.strftime("%I:%M %p") for time in times]
+    
+    @classmethod
+    def get_logprobs_mask(cls) -> set[str]:
+        mask = set(cls.suspects) | set(cls.weapons) | set(cls.rooms) | set(cls.motives)
+        for element in mask.copy():
+            mask.add(f" {element}")
+        return mask
 
     prefixes = dict(weapon="the ", room="the ")
 
