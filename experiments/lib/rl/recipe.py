@@ -39,6 +39,8 @@ from typing import (
 )
 from warnings import warn
 
+from .mlp_head_checkpointer import MLP_HEAD_KEY, MLPHeadCheckpointer
+from .mlp_head import MLPHead
 from .pack import PackedTensors
 from .ppo import PPOLoss, PPOResult, shift_tensor
 
@@ -482,6 +484,16 @@ class TuneRecipe(FTRecipeInterface):
             ac_mode=cfg.get("ac_mode", None),
             ac_option=cfg.get("ac_option", None),
         )
+        
+        # Initialize MLP head if using MLPHeadCheckpointer
+        self._mlp_head = None
+        if isinstance(self._checkpointer, MLPHeadCheckpointer):
+            self._mlp_head = MLPHead(
+                hidden_size=self._model.config.hidden_size,
+                use_intermediate_layer=True,
+            ).to(self._device)
+            if MLP_HEAD_KEY in checkpoint_dict:
+                self._mlp_head.load_state_dict(checkpoint_dict[MLP_HEAD_KEY])
 
         if self.reference_model_state_dict:
             # pin reference model state
@@ -938,6 +950,10 @@ class TuneRecipe(FTRecipeInterface):
                     }
                 )
 
+            # Add MLP head state to checkpoint if it exists
+            if self._mlp_head is not None:
+                checkpoint_dict[MLP_HEAD_KEY] = self._mlp_head.state_dict()
+
             self._checkpointer.save_checkpoint(
                 checkpoint_dict,
                 epoch=epoch,
@@ -1046,6 +1062,11 @@ class TuneRecipe(FTRecipeInterface):
                     )
                     del batch["mask"], batch["input_pos"]  # type: ignore
 
+                if self._mlp_head is not None:
+                    mlp_head_preds = self._mlp_head(logits)
+                else:
+                    mlp_head_preds = None
+
                 # Compute loss
                 current_result = self._loss_fn.forward(
                     logits=logits,
@@ -1056,6 +1077,7 @@ class TuneRecipe(FTRecipeInterface):
                     reference_logprobs=reference_logprobs,
                     weights=batch["weights"],
                     bos_id=bos_id,
+                    mlp_head_preds=mlp_head_preds,
                 )
                 del logits, batch
 

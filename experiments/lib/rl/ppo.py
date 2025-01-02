@@ -233,6 +233,7 @@ class PPOLoss(nn.Module):
         reference_logprobs: torch.Tensor,
         weights: torch.Tensor,
         bos_id: int,
+        mlp_head_preds: Optional[torch.Tensor] = None,
     ) -> PPOResult:
         """
         Computes the PPO loss for sequence data, supporting both regular and chunked inputs.
@@ -270,12 +271,21 @@ class PPOLoss(nn.Module):
             bos_id (int):
                 Index of the beginning of sequence token in the vocabulary.
 
+            mlp_head_preds (Optional[Tensor]):
+                Shape: (batch_size, sequence_length)
+                Optional predictions from MLP head for each token.
+
         Returns:
             PPOResult: The combined loss results across all chunks.
         """
         if isinstance(logits, list):
             result = PPOResult().to(logits[0].device)
             num_chunks = len(logits)
+            mlp_chunks = (
+                mlp_head_preds.chunk(num_chunks, dim=1)
+                if mlp_head_preds is not None
+                else [None] * num_chunks
+            )
             for chunked_args in zip(
                 logits,
                 tokens.chunk(num_chunks, dim=1),
@@ -284,8 +294,11 @@ class PPOLoss(nn.Module):
                 logprobs.chunk(num_chunks, dim=1),
                 reference_logprobs.chunk(num_chunks, dim=1),
                 weights.chunk(num_chunks, dim=1),
+                mlp_chunks,
             ):
-                result += self._forward_chunk(*chunked_args, bos_id=bos_id)
+                result += self._forward_chunk(
+                    *chunked_args[:-1], mlp_head_preds=chunked_args[-1], bos_id=bos_id
+                )
             return result
 
         return self._forward_chunk(
@@ -297,6 +310,7 @@ class PPOLoss(nn.Module):
             reference_logprobs,
             weights,
             bos_id=bos_id,
+            mlp_head_preds=mlp_head_preds,
         )
 
     def _forward_chunk(
@@ -309,6 +323,7 @@ class PPOLoss(nn.Module):
         reference_logprobs: torch.Tensor,
         weights: torch.Tensor,
         bos_id: int,
+        mlp_head_preds: Optional[torch.Tensor] = None,
     ) -> PPOResult:
         """
         Processes a single chunk of the PPO loss computation.
