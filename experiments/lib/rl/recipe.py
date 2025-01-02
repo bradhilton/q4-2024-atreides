@@ -484,12 +484,13 @@ class TuneRecipe(FTRecipeInterface):
             ac_mode=cfg.get("ac_mode", None),
             ac_option=cfg.get("ac_option", None),
         )
-        
+        self._model.output_hidden_states = [len(self._model.layers) - 1]
+
         # Initialize MLP head if using MLPHeadCheckpointer
         self._mlp_head = None
         if isinstance(self._checkpointer, MLPHeadCheckpointer):
             self._mlp_head = MLPHead(
-                hidden_size=self._model.config.hidden_size,
+                hidden_size=self._model.tok_embeddings.embedding_dim,
                 use_intermediate_layer=True,
             ).to(self._device)
             if MLP_HEAD_KEY in checkpoint_dict:
@@ -1021,11 +1022,12 @@ class TuneRecipe(FTRecipeInterface):
 
                     # Run reference model forward pass without affecting autograd
                     with torch.no_grad(), self.activations_handling_ctx:
-                        logits = self._model(
+                        hidden_states, logits = self._model(
                             tokens=batch["tokens"],
                             mask=batch["mask"],
                             input_pos=batch["input_pos"],
                         )
+                        del hidden_states
                         if isinstance(logits, list):
                             reference_logprobs = torch.cat(
                                 [
@@ -1055,17 +1057,18 @@ class TuneRecipe(FTRecipeInterface):
                     reference_logprobs = batch["reference_logprobs"]
 
                 with self.activations_handling_ctx:
-                    logits = self._model(
+                    hidden_states, logits = self._model(
                         tokens=batch["tokens"],
                         mask=batch["mask"],
                         input_pos=batch["input_pos"],
                     )
-                    del batch["mask"], batch["input_pos"]  # type: ignore
+                del batch["mask"], batch["input_pos"]  # type: ignore
 
                 if self._mlp_head is not None:
-                    mlp_head_preds = self._mlp_head(logits)
+                    mlp_head_preds = self._mlp_head(hidden_states)
                 else:
                     mlp_head_preds = None
+                del hidden_states
 
                 # Compute loss
                 current_result = self._loss_fn.forward(

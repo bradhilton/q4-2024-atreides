@@ -605,7 +605,7 @@ class Completion:
             and get_token(token_logprobs[-1])
             == "<|im_end|>"  # TODO: Don't hardcode this token
         ):
-            token_advantages[-1] = float("nan")
+            token_advantages[-1] = max(token_advantage, 0.0)
         return token_advantages
 
     def all_token_advantages(
