@@ -1,3 +1,4 @@
+from copy import deepcopy
 import numpy as np
 from openai.types.chat.chat_completion import Choice, ChoiceLogprobs
 from openai.types.chat.chat_completion_assistant_message_param import (
@@ -247,6 +248,9 @@ class Completion:
             yield from self.parent.ancestors(including_self=True, reverse=reverse)
         if reverse and including_self:
             yield self
+
+    def cumulative_reward(self) -> float:
+        return self.reward + (self.parent.cumulative_reward() if self.parent else 0)
 
     def matches_model(self, model: Optional[str]) -> bool:
         return not model or not self.model or self.model == model
@@ -578,6 +582,29 @@ class Completion:
         if self.parent:
             num_prefix_tokens += self.parent.num_prefix_tokens()
         return num_prefix_tokens
+
+    def recursive_copy(
+        self, commit: bool = True, copy_root: bool = False, model: Optional[str] = None
+    ) -> "Completion":
+        if not copy_root and not self.parent:
+            return self
+        completion = Completion(
+            parent=(
+                self.parent.recursive_copy(commit=False, copy_root=copy_root)
+                if self.parent
+                else None
+            ),
+            messages=deepcopy(self.messages),
+            reward=self.reward,
+            children=set(),
+            weight=self.weight,
+            model=model or self.model,
+            fork=self.fork,
+            logprobs_mask=self.logprobs_mask,
+        )
+        if commit:
+            completion.commit()
+        return completion
 
     def root(self) -> "Completion":
         return self.parent.root() if self.parent else self
