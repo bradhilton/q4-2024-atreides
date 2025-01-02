@@ -112,8 +112,9 @@ class Episode:
         get_easier_episode: Optional[tuple[float, SampleEpisode]] = None,
         get_similar_episode: Optional[SampleEpisode] = None,
         get_harder_episode: Optional[tuple[float, SampleEpisode]] = None,
+        logprobs_mask: Optional[set[str]] = None,
     ) -> None:
-        self.completion = Completion(messages=messages)  # type: ignore
+        self.completion = Completion(messages=messages, logprobs_mask=logprobs_mask)  # type: ignore
         self.on_sample = on_sample
         self.examples = examples
         self.min_value = (get_easier_episode or [None])[0]

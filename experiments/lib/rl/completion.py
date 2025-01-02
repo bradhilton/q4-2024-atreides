@@ -71,6 +71,7 @@ class Completion:
         weight: float = 1.0,
         model: Optional[str] = None,
         fork: bool = False,
+        logprobs_mask: Optional[set[str]] = None,
     ):
         self.parent = parent
         self.messages = list(messages or [])
@@ -79,6 +80,7 @@ class Completion:
         self.weight = weight
         self.model = model
         self.fork = fork
+        self.logprobs_mask = logprobs_mask or set()
         self.reference_logprobs: Optional[torch.Tensor] = None
         self._cached_values: dict[tuple[Optional[str], Optional[bool]], float] = {}
         self._cached_max_values: dict[Optional[str], float] = {}
@@ -497,12 +499,40 @@ class Completion:
         )
 
     def logprobs(self) -> Iterable[float]:
+        mask: Optional[str] = None
+        pending_logprobs: list[float] = []
         for choice in self.messages:
             if isinstance(choice, Choice) and choice.logprobs:
                 for token_logprob in (
                     choice.logprobs.content or choice.logprobs.refusal or []
                 ):
-                    yield token_logprob.logprob
+                    token = get_token(token_logprob)
+                    if mask is not None:
+                        if mask == "":
+                            for _ in range(len(pending_logprobs)):
+                                yield float("nan")
+                            mask = None
+                            pending_logprobs = []
+                        elif token.startswith(mask):
+                            mask = mask.removeprefix(token)
+                            pending_logprobs.append(token_logprob.logprob)
+                        else:
+                            mask = None
+                            yield from pending_logprobs
+                            pending_logprobs = []
+                    else:
+                        for mask in self.logprobs_mask:
+                            if token.startswith(mask):
+                                mask = mask.removeprefix(token)
+                                pending_logprobs = [token_logprob.logprob]
+                                break
+                    if mask is None:
+                        yield token_logprob.logprob
+        if mask == "":
+            for _ in range(len(pending_logprobs)):
+                yield float("nan")
+        else:
+            yield from pending_logprobs
 
     def all_logprobs(self) -> Iterable[float]:
         if self.parent:
