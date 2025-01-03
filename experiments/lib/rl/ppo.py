@@ -2,7 +2,7 @@ from dataclasses import dataclass, field, fields
 import math
 import torch
 import torch.nn as nn
-from typing import Iterable, Literal, Optional, Union
+from typing import Iterable, Optional, Union
 
 
 ignore_labels_cache: dict[
@@ -219,9 +219,6 @@ class PPOLoss(nn.Module):
         value_coef: float = 0.0,
         value_quantile: Optional[float] = None,
         exploration_coef: float = 0.0,
-        exploration_logprobs: Literal[
-            "logprobs", "new_logprobs", "reference_logprobs"
-        ] = "logprobs",
         entropy_coef: float = 0.01,
         entropy_target: float = 0.5,
         entropy_target_coef: float = 0.0,
@@ -264,7 +261,6 @@ class PPOLoss(nn.Module):
             value_coef (float): Coefficient for the value loss (defaults to 0.0).
             value_quantile (Optional[float]): Optional quantile to use for (quantile) value loss. Defaults to None.
             exploration_coef (float): Coefficient for the exploration bonus to encourage exploration. Defaults to 0.0.
-            exploration_logprobs (Literal["logprobs", "new_logprobs", "reference_logprobs"]): Which logprobs to use for exploration bonus. Defaults to "logprobs".
             entropy_coef (float): Coefficient for the entropy bonus to encourage exploration.
             entropy_target (float): Target entropy (defaults to 0.5).
             entropy_target_coef (float): Coefficient for the entropy target loss.
@@ -301,7 +297,6 @@ class PPOLoss(nn.Module):
         self.value_coef = value_coef
         self.value_quantile = value_quantile
         self.exploration_coef = exploration_coef
-        self.exploration_logprobs = exploration_logprobs
         self.entropy_coef = entropy_coef
         self.entropy_target = entropy_target
         self.entropy_target_coef = entropy_target_coef
@@ -604,15 +599,7 @@ class PPOLoss(nn.Module):
             value_loss = torch.tensor(0.0, device=logits.device)
 
         # Exploration bonus
-        exploration_bonus = (
-            -{
-                "logprobs": logprobs,
-                "new_logprobs": new_logprobs,
-                "reference_logprobs": reference_logprobs,
-            }[self.exploration_logprobs]
-            .mul(weights)
-            .sum()
-        )
+        exploration_bonus = -new_logprobs.mul(weights).sum()
 
         # Entropy bonus
         entropy_bonus = entropy.mul(weights)
