@@ -2,7 +2,7 @@ from dataclasses import dataclass, field, fields
 import math
 import torch
 import torch.nn as nn
-from typing import Iterable, Optional, Union
+from typing import Iterable, Literal, Optional, Union
 
 
 ignore_labels_cache: dict[
@@ -116,6 +116,7 @@ class PPOResult:
     advantage_prediction_weight: torch.Tensor = tensor_field()
     advantage_weight: torch.Tensor = tensor_field()
     value_weight: torch.Tensor = tensor_field()
+    exploration_weight: torch.Tensor = tensor_field()
     entropy_weight: torch.Tensor = tensor_field()
     entropy_target_weight: torch.Tensor = tensor_field()
     kl_weight: torch.Tensor = tensor_field()
@@ -131,6 +132,7 @@ class PPOResult:
     advantage_prediction_loss: torch.Tensor = tensor_field()
     advantage_loss: torch.Tensor = tensor_field()
     value_loss: torch.Tensor = tensor_field()
+    exploration_bonus: torch.Tensor = tensor_field()
     entropy_bonus: torch.Tensor = tensor_field()
     entropy_target: torch.Tensor = tensor_field()
     kl_divergence: torch.Tensor = tensor_field()
@@ -179,6 +181,7 @@ class PPOResult:
             + (self.advantage_prediction_weight / self.num_tokens)
             * self.advantage_prediction_loss
             + (self.value_weight / self.num_tokens) * self.value_loss
+            - (self.exploration_weight / self.num_tokens) * self.exploration_bonus
             - (self.entropy_weight / self.num_tokens) * self.entropy_bonus
             + (self.entropy_target_weight / self.num_tokens) * self.entropy_target_loss
             + (self.kl_weight / self.num_tokens) * self.kl_divergence
@@ -215,6 +218,10 @@ class PPOLoss(nn.Module):
         advantage_quantile_weight: float = 1.0,
         value_coef: float = 0.0,
         value_quantile: Optional[float] = None,
+        exploration_coef: float = 0.0,
+        exploration_logprobs: Literal[
+            "logprobs", "new_logprobs", "reference_logprobs"
+        ] = "logprobs",
         entropy_coef: float = 0.01,
         entropy_target: float = 0.5,
         entropy_target_coef: float = 0.0,
@@ -256,6 +263,8 @@ class PPOLoss(nn.Module):
             advantage_quantile_weight (float): Weight for the quantile advantage loss if advantage_quantile is not None. Defaults to 1.0.
             value_coef (float): Coefficient for the value loss (defaults to 0.0).
             value_quantile (Optional[float]): Optional quantile to use for (quantile) value loss. Defaults to None.
+            exploration_coef (float): Coefficient for the exploration bonus to encourage exploration. Defaults to 0.0.
+            exploration_logprobs (Literal["logprobs", "new_logprobs", "reference_logprobs"]): Which logprobs to use for exploration bonus. Defaults to "logprobs".
             entropy_coef (float): Coefficient for the entropy bonus to encourage exploration.
             entropy_target (float): Target entropy (defaults to 0.5).
             entropy_target_coef (float): Coefficient for the entropy target loss.
@@ -291,6 +300,8 @@ class PPOLoss(nn.Module):
         self.advantage_quantile_weight = advantage_quantile_weight
         self.value_coef = value_coef
         self.value_quantile = value_quantile
+        self.exploration_coef = exploration_coef
+        self.exploration_logprobs = exploration_logprobs
         self.entropy_coef = entropy_coef
         self.entropy_target = entropy_target
         self.entropy_target_coef = entropy_target_coef
@@ -592,6 +603,17 @@ class PPOLoss(nn.Module):
         else:
             value_loss = torch.tensor(0.0, device=logits.device)
 
+        # Exploration bonus
+        exploration_bonus = (
+            -{
+                "logprobs": logprobs,
+                "new_logprobs": new_logprobs,
+                "reference_logprobs": reference_logprobs,
+            }[self.exploration_logprobs]
+            .mul(weights)
+            .sum()
+        )
+
         # Entropy bonus
         entropy_bonus = entropy.mul(weights)
         weighted_entropy_bonus = entropy_bonus.mul(-advantages).sum()  # Scalar
@@ -636,6 +658,7 @@ class PPOLoss(nn.Module):
             advantage_prediction_weight=self.advantage_prediction_coef * num_tokens,
             advantage_weight=self.advantage_coef * num_tokens,
             value_weight=self.value_coef * num_tokens,
+            exploration_weight=self.exploration_coef * num_tokens,
             entropy_weight=self.entropy_coef * num_tokens,
             entropy_target_weight=self.entropy_target_coef * num_tokens,
             kl_weight=self.kl_coef * num_tokens,
@@ -651,6 +674,7 @@ class PPOLoss(nn.Module):
             advantage_prediction_loss=advantage_prediction_loss,
             advantage_loss=advantage_loss,
             value_loss=value_loss,
+            exploration_bonus=exploration_bonus,
             entropy_bonus=entropy_bonus,
             entropy_target=self.entropy_target * num_tokens,
             kl_divergence=kl_divergence,

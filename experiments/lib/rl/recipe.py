@@ -1128,6 +1128,7 @@ class TuneRecipe(FTRecipeInterface):
                     )
                     advantage_to_log = per_token_result.advantage_loss.item()
                     value_to_log = per_token_result.value_loss.item()
+                    exploration_to_log = per_token_result.exploration_bonus.item()
                     entropy_to_log = per_token_result.entropy_bonus.item()
                     entropy_target_to_log = per_token_result.entropy_target_loss.item()
                     kl_div_to_log = per_token_result.kl_divergence.item()
@@ -1150,6 +1151,7 @@ class TuneRecipe(FTRecipeInterface):
                         advantage_prediction=f"{advantage_prediction_to_log:.4f}",
                         advantage=f"{advantage_to_log:.4f}",
                         value=f"{value_to_log:.4f}",
+                        exploration=f"{exploration_to_log:.4f}",
                         entropy=f"{entropy_to_log:.4f}",
                         entropy_target=f"{entropy_target_to_log:.4f}",
                         kl_div=f"{kl_div_to_log:.4f}",
@@ -1173,6 +1175,7 @@ class TuneRecipe(FTRecipeInterface):
                             "reinforce": reinforce_to_log,
                             "advantage_prediction": advantage_prediction_to_log,
                             "value": value_to_log,
+                            "exploration": exploration_to_log,
                             "entropy": entropy_to_log,
                             "entropy_target": entropy_target_to_log,
                             "kl_div": kl_div_to_log,
