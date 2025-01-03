@@ -27,7 +27,7 @@ class MLPHeadCheckpointer(FullModelHFCheckpointer):
         converted_state_dict = super().load_checkpoint()
 
         # Try to load MLP head weights if they exist
-        mlp_head_path = self._checkpoint_dir / "mlp_head.pt"
+        mlp_head_path = self._checkpoint_dir / "mlp_head.pt.ignore"
         if mlp_head_path.exists():
             logger.info(f"Loading MLP head weights from {mlp_head_path}")
             converted_state_dict[MLP_HEAD_KEY] = safe_torch_load(mlp_head_path)
@@ -56,7 +56,7 @@ class MLPHeadCheckpointer(FullModelHFCheckpointer):
         if MLP_HEAD_KEY in state_dict:
             output_path = Path.joinpath(
                 self._output_dir, f"mlp_head_{epoch}"
-            ).with_suffix(".pt")
+            ).with_suffix(".pt.ignore")
             torch.save(state_dict[MLP_HEAD_KEY], output_path)
             logger.info(f"MLP head checkpoint saved to {output_path}")
 

@@ -486,15 +486,14 @@ class TuneRecipe(FTRecipeInterface):
         )
         self._model.output_hidden_states = [len(self._model.layers) - 1]
 
-        # Initialize MLP head if using MLPHeadCheckpointer
-        self._mlp_head = None
-        if isinstance(self._checkpointer, MLPHeadCheckpointer):
-            self._mlp_head = MLPHead(
-                hidden_size=self._model.tok_embeddings.embedding_dim,
-                use_intermediate_layer=True,
-            ).to(self._device)
-            if MLP_HEAD_KEY in checkpoint_dict:
-                self._mlp_head.load_state_dict(checkpoint_dict[MLP_HEAD_KEY])
+        # Initialize value head
+        self._value_head = MLPHead(
+            hidden_size=self._model.tok_embeddings.embedding_dim,
+            use_intermediate_layer=True,
+            dtype=self._dtype,
+        ).to(self._device)
+        if MLP_HEAD_KEY in checkpoint_dict:
+            self._value_head.load_state_dict(checkpoint_dict[MLP_HEAD_KEY])
 
         if self.reference_model_state_dict:
             # pin reference model state
@@ -951,9 +950,8 @@ class TuneRecipe(FTRecipeInterface):
                     }
                 )
 
-            # Add MLP head state to checkpoint if it exists
-            if self._mlp_head is not None:
-                checkpoint_dict[MLP_HEAD_KEY] = self._mlp_head.state_dict()
+            if isinstance(self._checkpointer, MLPHeadCheckpointer):
+                checkpoint_dict[MLP_HEAD_KEY] = self._value_head.state_dict()
 
             self._checkpointer.save_checkpoint(
                 checkpoint_dict,
@@ -1064,15 +1062,13 @@ class TuneRecipe(FTRecipeInterface):
                     )
                 del batch["mask"], batch["input_pos"]  # type: ignore
 
-                if self._mlp_head is not None:
-                    mlp_head_preds = self._mlp_head(hidden_states)
-                else:
-                    mlp_head_preds = None
+                mlp_head_preds = self._value_head(hidden_states)
                 del hidden_states
 
                 # Compute loss
                 current_result = self._loss_fn.forward(
                     logits=logits,
+                    value_predictions=mlp_head_preds,
                     tokens=batch["tokens"],
                     values=batch["values"],
                     advantages=batch["advantages"],
@@ -1080,7 +1076,6 @@ class TuneRecipe(FTRecipeInterface):
                     reference_logprobs=reference_logprobs,
                     weights=batch["weights"],
                     bos_id=bos_id,
-                    mlp_head_preds=mlp_head_preds,
                 )
                 del logits, batch
 
@@ -1128,6 +1123,9 @@ class TuneRecipe(FTRecipeInterface):
                         per_token_result.tanh_log_policy_loss.item()
                     )
                     reinforce_to_log = per_token_result.reinforce_loss.item()
+                    advantage_prediction_to_log = (
+                        per_token_result.advantage_prediction_loss.item()
+                    )
                     advantage_to_log = per_token_result.advantage_loss.item()
                     value_to_log = per_token_result.value_loss.item()
                     entropy_to_log = per_token_result.entropy_bonus.item()
@@ -1149,6 +1147,7 @@ class TuneRecipe(FTRecipeInterface):
                         unclipped_policy=f"{unclipped_policy_to_log:.4f}",
                         tanh_log_policy=f"{tanh_log_policy_to_log:.4f}",
                         reinforce=f"{reinforce_to_log:.4f}",
+                        advantage_prediction=f"{advantage_prediction_to_log:.4f}",
                         advantage=f"{advantage_to_log:.4f}",
                         value=f"{value_to_log:.4f}",
                         entropy=f"{entropy_to_log:.4f}",
@@ -1172,7 +1171,7 @@ class TuneRecipe(FTRecipeInterface):
                             "unclipped_policy": unclipped_policy_to_log,
                             "tanh_log_policy": tanh_log_policy_to_log,
                             "reinforce": reinforce_to_log,
-                            "advantage": advantage_to_log,
+                            "advantage_prediction": advantage_prediction_to_log,
                             "value": value_to_log,
                             "entropy": entropy_to_log,
                             "entropy_target": entropy_target_to_log,

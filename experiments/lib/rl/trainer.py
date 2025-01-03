@@ -36,6 +36,7 @@ from .completion import Completion, SplitMethod
 from .completion_sampler import SamplingKwargs, CompletionSampler, CompletionSamplerPool
 from .episode import Episode
 from .explore_result import ExploreResult
+from .mlp_head_checkpointer import MLPHeadCheckpointer
 from .pack import packed_tensors, PackedDataset, PackedTensors
 from .recipe import ComponentConfig, recipe_main, TuneRecipeConfig
 from ..tokenizer import Tokenizer
@@ -735,6 +736,7 @@ class Trainer:
     #     )
 
     async def tune(self, result: ExploreResult, *, verbosity: Verbosity = 2) -> None:
+        print(f"Tuning model on {len(result.sequences)} sequences")
         await self.stop_vllms()
         if (
             not self.reference_clients
@@ -753,6 +755,7 @@ class Trainer:
                 if self.model != self.base_model
                 else None
             ),
+            mlp_head_checkpointer=True,
         )
         if not self.tune_recipe_config.metric_logger:
             self.tune_recipe_config.metric_logger = (
@@ -885,16 +888,20 @@ class Trainer:
         return stdout.decode().strip()
 
     def _get_checkpointer_config(
-        self, checkpoint_dir: str, checkpoint_files: Optional[list[str]]
+        self,
+        checkpoint_dir: str,
+        checkpoint_files: Optional[list[str]],
+        mlp_head_checkpointer: bool = False,
     ) -> ComponentConfig[FullModelHFCheckpointer]:
         return ComponentConfig(
-            FullModelHFCheckpointer,
+            MLPHeadCheckpointer if mlp_head_checkpointer else FullModelHFCheckpointer,
             checkpoint_dir=checkpoint_dir,
             checkpoint_files=checkpoint_files
             or [
                 file
                 for ext in ["safetensors", "pt", "ckpt", "bin", "pth"]
                 for file in glob.glob(f"{checkpoint_dir}/*.{ext}")
+                if not file.endswith("mlp_head.pt")
             ],
             recipe_checkpoint=None,
             output_dir=self.output_dir,
@@ -949,12 +956,12 @@ class Trainer:
                 shutil.copy2(src, dst)
 
         # Move model checkpoint files to the iteration directory
-        for src in glob.glob(f"{self.output_dir}/hf_model_*_{epoch}.pt"):
-            dst = f"{iteration_dir}/{os.path.basename(src)}"
+        for src in glob.glob(f"{self.output_dir}/*_{epoch}.pt"):
+            dst = f"{iteration_dir}/{os.path.basename(src).replace(f'_{epoch}.pt', '.pt')}"
             shutil.move(src, dst)
 
         # Delete remaining model checkpoint files in checkpoint_output_dir root
-        for file in glob.glob(f"{self.output_dir}/hf_model_*_*.pt"):
+        for file in glob.glob(f"{self.output_dir}/*.pt"):
             if os.path.isfile(file):
                 os.remove(file)
 

@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field, fields
+import math
 import torch
 import torch.nn as nn
 from typing import Iterable, Optional, Union
@@ -39,6 +40,70 @@ def shift_tensor(
     return torch.cat((labels[..., 1:], ignore_labels), dim=1)
 
 
+def gae(
+    advantages: torch.Tensor,
+    gamma: float,
+    lam: float,
+    num_vectorized_iterations: int,
+) -> torch.Tensor:
+    """
+    Compute Generalized Advantage Estimation (GAE) advantages.
+
+    Args:
+        advantages (torch.Tensor): The advantages to compute GAE for.
+        gamma (float): The discount factor.
+        lam (float): The decay factor for GAE.
+        num_vectorized_iterations (int): The number of iterations to perform to for vectorized GAE.
+
+    Returns:
+        torch.Tensor: The GAE advantages.
+    """
+    alpha = gamma * lam
+    if num_vectorized_iterations == 0:
+        # Standard GAE
+        out = torch.zeros_like(advantages)
+        running = 0.0
+        for t in reversed(range(len(advantages))):
+            out[t] = running = advantages[t] + alpha * running
+        return out
+    weights = torch.exp(
+        torch.log(torch.tensor(alpha, dtype=advantages.dtype))
+        * torch.arange(advantages.shape[0], dtype=advantages.dtype)
+    ).flip(0)
+    epsilon = 1e-7
+    weights = weights[weights > epsilon]
+    num_chunks = math.ceil(advantages.shape[0] / weights.shape[0])
+    if num_chunks == 1:
+        return weighted_advantages(advantages, weights)
+    gae_advantages = torch.cat(
+        [
+            weighted_advantages(chunk, weights)
+            for chunk in advantages.chunk(num_chunks, dim=0)
+        ]
+    )
+    # Perform additional iterations with offset starting points to reduce boundary effects
+    # between chunks. This helps smooth out the GAE advantages at chunk boundaries by
+    # computing overlapping windows with different alignments.
+    chunk_size = advantages.shape[0] // num_chunks
+    for i in range(1, num_vectorized_iterations):
+        offset = i * chunk_size // num_vectorized_iterations
+        for chunk in advantages[offset:].chunk(num_chunks, dim=0)[:-1]:
+            gae_advantages[
+                offset : offset + chunk_size // num_vectorized_iterations
+            ] = weighted_advantages(chunk, weights)[
+                : chunk_size // num_vectorized_iterations
+            ]
+    return gae_advantages
+
+
+def weighted_advantages(
+    advantages: torch.Tensor, reversed_weights: torch.Tensor
+) -> torch.Tensor:
+    a = advantages.flip(0)
+    w = reversed_weights[: a.shape[0]]
+    return (torch.cumsum(a * w, dim=0) / torch.cumsum(w, dim=0)).flip(0)
+
+
 tensor_field = lambda: field(default_factory=lambda: torch.tensor(0.0))
 
 
@@ -48,6 +113,7 @@ class PPOResult:
     unclipped_policy_weight: torch.Tensor = tensor_field()
     tanh_log_policy_weight: torch.Tensor = tensor_field()
     reinforce_weight: torch.Tensor = tensor_field()
+    advantage_prediction_weight: torch.Tensor = tensor_field()
     advantage_weight: torch.Tensor = tensor_field()
     value_weight: torch.Tensor = tensor_field()
     entropy_weight: torch.Tensor = tensor_field()
@@ -62,6 +128,7 @@ class PPOResult:
     unclipped_policy_loss: torch.Tensor = tensor_field()
     tanh_log_policy_loss: torch.Tensor = tensor_field()
     reinforce_loss: torch.Tensor = tensor_field()
+    advantage_prediction_loss: torch.Tensor = tensor_field()
     advantage_loss: torch.Tensor = tensor_field()
     value_loss: torch.Tensor = tensor_field()
     entropy_bonus: torch.Tensor = tensor_field()
@@ -109,7 +176,8 @@ class PPOResult:
             + (self.tanh_log_policy_weight / self.num_tokens)
             * self.tanh_log_policy_loss
             + (self.reinforce_weight / self.num_tokens) * self.reinforce_loss
-            + (self.advantage_weight / self.num_tokens) * self.advantage_loss
+            + (self.advantage_prediction_weight / self.num_tokens)
+            * self.advantage_prediction_loss
             + (self.value_weight / self.num_tokens) * self.value_loss
             - (self.entropy_weight / self.num_tokens) * self.entropy_bonus
             + (self.entropy_target_weight / self.num_tokens) * self.entropy_target_loss
@@ -135,6 +203,11 @@ class PPOLoss(nn.Module):
         clip_epsilon: float = 0.2,
         exploitation_penalty: float = 0.0,
         use_reference_logprobs: bool = False,
+        advantage_prediction_coef: float = 1.0,
+        gae_gamma: float = 1.0,
+        gae_lam: float = 0.95,
+        gae_num_vectorized_iterations: int = 0,
+        predicted_advantage_weight: float = 0.5,
         advantage_coef: float = 0.0,
         advantage_ratio: bool = False,
         advantage_regularization: float = 1.0,
@@ -171,6 +244,11 @@ class PPOLoss(nn.Module):
                 premature convergence and encourages exploration. Defaults to 0.0.
             use_reference_logprobs (bool): If True, uses reference_logprobs instead of
                 logprobs for policy losses. Defaults to False.
+            advantage_prediction_coef (float): Coefficient for the advantage prediction loss. Defaults to 1.0.
+            gae_gamma (float): The discount factor for GAE. Defaults to 1.0.
+            gae_lam (float): The decay factor for GAE. Defaults to 0.95.
+            gae_num_vectorized_iterations (int): The number of iterations to perform to for vectorized GAE. Defaults to 0 (unvectorized GAE).
+            predicted_advantage_weight (float): How much to weight predicted advantages vs. estimated advantages. Defaults to 0.5.
             advantage_coef (float): Coefficient for the advantage loss. Defaults to 0.0.
             advantage_ratio (bool): If True, uses the ratio of the new and old logprobs for the advantage loss. Defaults to False.
             advantage_regularization (float): Regularization for the advantage loss. Defaults to 1.0.
@@ -201,6 +279,11 @@ class PPOLoss(nn.Module):
         self.clip_epsilon = clip_epsilon
         self.exploitation_penalty = exploitation_penalty
         self.use_reference_logprobs = use_reference_logprobs
+        self.advantage_prediction_coef = advantage_prediction_coef
+        self.gae_gamma = gae_gamma
+        self.gae_lam = gae_lam
+        self.gae_num_vectorized_iterations = gae_num_vectorized_iterations
+        self.predicted_advantage_weight = predicted_advantage_weight
         self.advantage_coef = advantage_coef
         self.advantage_ratio = advantage_ratio
         self.advantage_regularization = advantage_regularization
@@ -226,6 +309,7 @@ class PPOLoss(nn.Module):
         self,
         *,
         logits: Union[torch.Tensor, list[torch.Tensor]],
+        value_predictions: torch.Tensor,
         tokens: torch.Tensor,
         values: torch.Tensor,
         advantages: torch.Tensor,
@@ -233,7 +317,6 @@ class PPOLoss(nn.Module):
         reference_logprobs: torch.Tensor,
         weights: torch.Tensor,
         bos_id: int,
-        mlp_head_preds: Optional[torch.Tensor] = None,
     ) -> PPOResult:
         """
         Computes the PPO loss for sequence data, supporting both regular and chunked inputs.
@@ -243,6 +326,10 @@ class PPOLoss(nn.Module):
                 Either a single tensor of shape (batch_size, sequence_length, vocab_size)
                 or a list of chunked tensors, each of shape
                 (batch_size, sequence_length/num_chunks, vocab_size).
+
+            value_predictions (Tensor):
+                Shape: (batch_size, sequence_length)
+                Value predictions for each token.
 
             tokens (Tensor):
                 Shape: (batch_size, sequence_length)
@@ -271,38 +358,28 @@ class PPOLoss(nn.Module):
             bos_id (int):
                 Index of the beginning of sequence token in the vocabulary.
 
-            mlp_head_preds (Optional[Tensor]):
-                Shape: (batch_size, sequence_length)
-                Optional predictions from MLP head for each token.
-
         Returns:
             PPOResult: The combined loss results across all chunks.
         """
         if isinstance(logits, list):
             result = PPOResult().to(logits[0].device)
             num_chunks = len(logits)
-            mlp_chunks = (
-                mlp_head_preds.chunk(num_chunks, dim=1)
-                if mlp_head_preds is not None
-                else [None] * num_chunks
-            )
             for chunked_args in zip(
                 logits,
+                value_predictions.chunk(num_chunks, dim=1),
                 tokens.chunk(num_chunks, dim=1),
                 values.chunk(num_chunks, dim=1),
                 advantages.chunk(num_chunks, dim=1),
                 logprobs.chunk(num_chunks, dim=1),
                 reference_logprobs.chunk(num_chunks, dim=1),
                 weights.chunk(num_chunks, dim=1),
-                mlp_chunks,
             ):
-                result += self._forward_chunk(
-                    *chunked_args[:-1], mlp_head_preds=chunked_args[-1], bos_id=bos_id
-                )
+                result += self._forward_chunk(*chunked_args, bos_id=bos_id)
             return result
 
         return self._forward_chunk(
             logits,
+            value_predictions,
             tokens,
             values,
             advantages,
@@ -310,12 +387,12 @@ class PPOLoss(nn.Module):
             reference_logprobs,
             weights,
             bos_id=bos_id,
-            mlp_head_preds=mlp_head_preds,
         )
 
     def _forward_chunk(
         self,
         logits: torch.Tensor,
+        value_predictions: torch.Tensor,
         tokens: torch.Tensor,
         values: torch.Tensor,
         advantages: torch.Tensor,
@@ -323,13 +400,19 @@ class PPOLoss(nn.Module):
         reference_logprobs: torch.Tensor,
         weights: torch.Tensor,
         bos_id: int,
-        mlp_head_preds: Optional[torch.Tensor] = None,
     ) -> PPOResult:
         """
         Processes a single chunk of the PPO loss computation.
         """
         # Flatten logits tensor to shape (batch_size * sequence_length, vocab_size)
         logits = logits.view(-1, logits.size(-1))
+        if self.normalize_value_predictions:
+            value_predictions = (value_predictions - value_predictions.mean()) / (
+                value_predictions.std() + 1e-8
+            )
+        advantage_predictions = (
+            shift_tensor(value_predictions, ignore_label=bos_id) - value_predictions
+        ).view(-1)
         # Shape: (batch_size * sequence_length,)
         tokens = shift_tensor(tokens, ignore_label=bos_id).view(-1)
         values = shift_tensor(values).view(-1)
@@ -395,6 +478,7 @@ class PPOLoss(nn.Module):
         # Shape: (num_tokens,)
         new_logprobs = new_logprobs[mask]
         logprobs = logprobs[mask]
+        advantage_predictions = advantage_predictions[mask]
         values = values[mask]
         advantages = advantages[mask]
         entropy = entropy[mask]
@@ -414,6 +498,20 @@ class PPOLoss(nn.Module):
         # Calculate the probability ratio (π_θ(a|s) / π_θ_old(a|s))
         log_ratio = new_logprobs - old_logprobs  # Shape: (num_tokens,)
         ratio = torch.exp(log_ratio)  # Shape: (num_tokens,)
+
+        # Generalized Advantage Estimation
+        gae_advantages = gae(
+            advantages, self.gae_gamma, self.gae_lam, self.gae_num_vectorized_iterations
+        )
+        gae_advantages = (gae_advantages - gae_advantages.mean()) / (
+            gae_advantages.std() + 1e-8
+        )
+
+        estimated_advantages = advantages
+        advantages = (
+            self.predicted_advantage_weight * gae_advantages
+            + (1 - self.predicted_advantage_weight) * estimated_advantages
+        )
 
         # Calculate the surrogate losses
         surrogate1 = ratio * advantages  # Shape: (num_tokens,)
@@ -440,6 +538,11 @@ class PPOLoss(nn.Module):
 
         # Calculate REINFORCE loss
         reinforce_loss = -(new_logprobs * advantages).mul(weights).sum()  # Scalar
+
+        # Calculate MSE advantage prediction loss between predicted and estimated advantages
+        advantage_prediction_loss = (
+            (advantage_predictions - estimated_advantages).pow(2).mul(weights).sum()
+        )  # Scalar
 
         if self.advantage_coef:
             # Calculate the advantage loss
@@ -530,6 +633,7 @@ class PPOLoss(nn.Module):
             unclipped_policy_weight=self.unclipped_policy_coef * num_tokens,
             tanh_log_policy_weight=self.tanh_log_policy_coef * num_tokens,
             reinforce_weight=self.reinforce_coef * num_tokens,
+            advantage_prediction_weight=self.advantage_prediction_coef * num_tokens,
             advantage_weight=self.advantage_coef * num_tokens,
             value_weight=self.value_coef * num_tokens,
             entropy_weight=self.entropy_coef * num_tokens,
@@ -544,6 +648,7 @@ class PPOLoss(nn.Module):
             unclipped_policy_loss=unclipped_policy_loss,
             tanh_log_policy_loss=tanh_log_policy_loss,
             reinforce_loss=reinforce_loss,
+            advantage_prediction_loss=advantage_prediction_loss,
             advantage_loss=advantage_loss,
             value_loss=value_loss,
             entropy_bonus=entropy_bonus,

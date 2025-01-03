@@ -332,12 +332,8 @@ class ExploreResult:
 
     def _normalize(self, packed_tensors: PackedTensors, key: str) -> None:
         x = packed_tensors[key][: len(self.sequences)]
-        weights = packed_tensors["weights"][: len(self.sequences)]
         x -= torch.nanmean(x)
-        x /= (
-            torch.sum(torch.abs(x[~torch.isnan(x)] * weights[~torch.isnan(x)]))
-            / self.abs_weighted_sum
-        ) or 1.0
+        x /= torch.std(x[~torch.isnan(x)])
 
     def _sequences_to_tensor(
         self,

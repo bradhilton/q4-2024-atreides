@@ -1,20 +1,20 @@
 import torch.nn as nn
 from torch import Tensor
 from typing import Optional
+import torch
 
 
 class MLPHead(nn.Module):
     """
-    MLP head for PPO that estimates the value or advantage for each position in the sequence.
-
-    The head takes the hidden states from the transformer and projects them to scalar values
-    for each token position, allowing for per-token value/advantage estimation in PPO training.
+    MLP head for transformer models that projects the hidden states to scalar values
+    for each token position.
 
     Args:
         hidden_size: Dimension of the transformer's hidden states
         intermediate_size: Size of the intermediate layer (if used)
         dropout_rate: Dropout probability
         use_intermediate_layer: Whether to use an intermediate layer before final projection
+        dtype: Data type for the MLP head layers
     """
 
     def __init__(
@@ -23,6 +23,7 @@ class MLPHead(nn.Module):
         intermediate_size: Optional[int] = None,
         dropout_rate: float = 0.1,
         use_intermediate_layer: bool = True,
+        dtype: Optional[torch.dtype] = None,
     ) -> None:
         super().__init__()
 
@@ -32,19 +33,19 @@ class MLPHead(nn.Module):
                 intermediate_size = hidden_size // 4
 
             self.head = nn.Sequential(
-                nn.Linear(hidden_size, intermediate_size),
-                nn.Tanh(),  # Tanh tends to work better than ReLU for value/advantage estimation
+                nn.Linear(hidden_size, intermediate_size, dtype=dtype),
+                nn.Tanh(),  # Tanh tends to work better than ReLU for value estimation
                 nn.Dropout(dropout_rate),
-                nn.Linear(intermediate_size, 1),
+                nn.Linear(intermediate_size, 1, dtype=dtype),
             )
         else:
-            self.head = nn.Linear(hidden_size, 1)
+            self.head = nn.Linear(hidden_size, 1, dtype=dtype)
 
     def forward(
         self, hidden_states: Tensor, attention_mask: Optional[Tensor] = None
     ) -> Tensor:
         """
-        Compute value/advantage predictions for each position in the sequence.
+        Compute predictions for each position in the sequence.
 
         Args:
             hidden_states: Transformer hidden states [batch_size, seq_len, hidden_size]
@@ -52,7 +53,7 @@ class MLPHead(nn.Module):
                           and 0 indicates masked tokens. Can be irregular.
 
         Returns:
-            predictions: Predictions [batch_size, seq_len] with values/advantages for each token position
+            predictions: Predictions [batch_size, seq_len] for each token position
         """
         # Project each position's hidden state to a value
         predictions = self.head(hidden_states).squeeze(-1)  # [batch_size, seq_len]
