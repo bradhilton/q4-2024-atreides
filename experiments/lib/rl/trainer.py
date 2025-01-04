@@ -956,7 +956,11 @@ class Trainer:
                 shutil.copy2(src, dst)
 
         # Move model checkpoint files to the iteration directory
-        for src in glob.glob(f"{self.output_dir}/*_{epoch}.pt"):
+        for src in [
+            path
+            for extension in ("pt", "pt.ignore")
+            for path in glob.glob(f"{self.output_dir}/*_{epoch}.{extension}")
+        ]:
             dst = f"{iteration_dir}/{os.path.basename(src).replace(f'_{epoch}.pt', '.pt')}"
             shutil.move(src, dst)
 
