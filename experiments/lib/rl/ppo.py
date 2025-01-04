@@ -2,7 +2,7 @@ from dataclasses import dataclass, field, fields
 import math
 import torch
 import torch.nn as nn
-from typing import Iterable, Optional, Union
+from typing import Iterable, Literal, Optional, Union
 
 
 ignore_labels_cache: dict[
@@ -207,6 +207,9 @@ class PPOLoss(nn.Module):
         exploitation_penalty: float = 0.0,
         use_reference_logprobs: bool = False,
         advantage_prediction_coef: float = 1.0,
+        advantage_prediction_error_type: Literal["squared", "absolute"] = "squared",
+        advantage_prediction_quantile: Optional[float] = None,
+        advantage_prediction_quantile_weight: float = 1.0,
         gae_gamma: float = 1.0,
         gae_lam: float = 0.95,
         gae_num_vectorized_iterations: int = 0,
@@ -249,6 +252,9 @@ class PPOLoss(nn.Module):
             use_reference_logprobs (bool): If True, uses reference_logprobs instead of
                 logprobs for policy losses. Defaults to False.
             advantage_prediction_coef (float): Coefficient for the advantage prediction loss. Defaults to 1.0.
+            advantage_prediction_error_type (Literal["squared", "absolute"]): The type of error to use for the advantage prediction loss. Defaults to "squared".
+            advantage_prediction_quantile (Optional[float]): Optional quantile to use for (quantile) advantage prediction loss. Defaults to None.
+            advantage_prediction_quantile_weight (float): Weight for the quantile advantage prediction loss if advantage_prediction_quantile is not None. Defaults to 1.0.
             gae_gamma (float): The discount factor for GAE. Defaults to 1.0.
             gae_lam (float): The decay factor for GAE. Defaults to 0.95.
             gae_num_vectorized_iterations (int): The number of iterations to perform to for vectorized GAE. Defaults to 0 (unvectorized GAE).
@@ -285,6 +291,9 @@ class PPOLoss(nn.Module):
         self.exploitation_penalty = exploitation_penalty
         self.use_reference_logprobs = use_reference_logprobs
         self.advantage_prediction_coef = advantage_prediction_coef
+        self.advantage_prediction_error_type = advantage_prediction_error_type
+        self.advantage_prediction_quantile = advantage_prediction_quantile
+        self.advantage_prediction_quantile_weight = advantage_prediction_quantile_weight
         self.gae_gamma = gae_gamma
         self.gae_lam = gae_lam
         self.gae_num_vectorized_iterations = gae_num_vectorized_iterations
@@ -513,10 +522,10 @@ class PPOLoss(nn.Module):
             gae_advantages.std() + 1e-8
         )
 
-        estimated_advantages = advantages
+        advantage_estimates = advantages
         advantages = (
             self.predicted_advantage_weight * gae_advantages
-            + (1 - self.predicted_advantage_weight) * estimated_advantages
+            + (1 - self.predicted_advantage_weight) * advantage_estimates
         )
 
         # Calculate the surrogate losses
@@ -545,10 +554,32 @@ class PPOLoss(nn.Module):
         # Calculate REINFORCE loss
         reinforce_loss = -(new_logprobs * advantages).mul(weights).sum()  # Scalar
 
-        # Calculate MSE advantage prediction loss between predicted and estimated advantages
-        advantage_prediction_loss = (
-            (advantage_predictions - estimated_advantages).pow(2).mul(weights).sum()
-        )  # Scalar
+        # Calculate advantage prediction loss between predicted and estimated advantages
+        advantage_prediction_diff = advantage_predictions - advantage_estimates
+        advantage_prediction_error = (
+            advantage_prediction_diff.pow(2)
+            if self.advantage_prediction_error_type == "squared"
+            else advantage_prediction_diff.abs()
+        )
+        if self.advantage_prediction_quantile:
+            advantage_prediction_quantile_error = (
+                torch.where(
+                    advantage_prediction_diff > 0,
+                    self.advantage_prediction_quantile * advantage_prediction_error,
+                    (1 - self.advantage_prediction_quantile)
+                    * advantage_prediction_error,
+                )
+                * 2
+            )
+            advantage_prediction_error = (
+                (1 - self.advantage_prediction_quantile_weight)
+                * advantage_prediction_error
+                + self.advantage_prediction_quantile_weight
+                * advantage_prediction_quantile_error
+            )
+        advantage_prediction_loss = advantage_prediction_error.mul(
+            weights
+        ).sum()  # Scalar
 
         if self.advantage_coef:
             # Calculate the advantage loss
