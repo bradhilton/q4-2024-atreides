@@ -6,6 +6,7 @@ from openai import AsyncOpenAI
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
 from openai.types.chat.completion_create_params import CompletionCreateParamsBase
+import random
 from types import TracebackType
 from typing import (
     Any,
@@ -443,9 +444,13 @@ class CompletionSamplerPool(CompletionSampler):
             completion_sampler = self.router[root]
         else:
             counter = Counter(self.router.values())
-            completion_sampler = self.router[root] = min(
-                self.samplers,
-                key=lambda sampler: counter[sampler],
+            completion_sampler = self.router[root] = (
+                min(
+                    self.samplers,
+                    key=lambda sampler: counter[sampler] + random.random(),
+                )
+                if random.random() < 0.75
+                else random.choice(self.samplers)
             )
         return await completion_sampler.sample_completions(
             parent,

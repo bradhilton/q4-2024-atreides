@@ -765,7 +765,7 @@ class Trainer:
             )
         self.tune_recipe_config.model = ComponentConfig(self.tune_model)
         self.tune_recipe_config.dataset = ComponentConfig(
-            PackedDataset, **result.disk_packed_tensors()
+            PackedDataset, **result.disk_packed_tensors(drop_last=True)
         )
         if (
             not self.reference_clients

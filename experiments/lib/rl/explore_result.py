@@ -57,10 +57,12 @@ class ExploreResult:
                 packed_tensors["mask"][0][0][0] = True
         return self
 
-    def disk_packed_tensors(self) -> DiskPackedTensors:
+    def disk_packed_tensors(self, drop_last: bool = False) -> DiskPackedTensors:
         return DiskPackedTensors(
             dir=self.tensor_dir,
-            num_sequences=len(self.sequences),
+            num_sequences=(
+                len(self.sequences) - 1 if drop_last else len(self.sequences)
+            ),
             sequence_length=self.sequence_length,
         )
 

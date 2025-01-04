@@ -1,7 +1,8 @@
-import torch.nn as nn
-from torch import Tensor
-from typing import Optional
 import torch
+from torch import Tensor
+import torch.nn as nn
+from torch.distributed._composable.fsdp import CPUOffloadPolicy, fully_shard  # type: ignore
+from typing import Any, Optional
 
 
 class MLPHead(nn.Module):
@@ -63,3 +64,20 @@ class MLPHead(nn.Module):
             predictions = predictions * attention_mask
 
         return predictions
+
+    def materialize_and_shard(
+        self, device: torch.device, reshard_after_forward: bool, fsdp_cpu_offload: bool
+    ) -> None:
+        # Materialize value head parameters before FSDP
+        self.head = self.head.to_empty(device=device)
+
+        # Reset parameters
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                module.reset_parameters()
+
+        # Apply FSDP to value head
+        fsdp_kwargs: dict[str, Any] = {"reshard_after_forward": reshard_after_forward}
+        if fsdp_cpu_offload:
+            fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
+        fully_shard(self, **fsdp_kwargs)
