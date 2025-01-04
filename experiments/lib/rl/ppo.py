@@ -201,6 +201,7 @@ class PPOLoss(nn.Module):
         policy_coef: float = 1.0,
         unclipped_policy_coef: float = 0.0,
         tanh_log_policy_coef: float = 0.0,
+        tanh_log_policy_beta: float = 1.0,
         tanh_log_advantages_first: bool = False,
         reinforce_coef: float = 0.0,
         clip_epsilon: float = 0.2,
@@ -243,6 +244,7 @@ class PPOLoss(nn.Module):
             policy_coef (float): Coefficient for the clipped policy loss. Defaults to 1.0.
             unclipped_policy_coef (float): Coefficient for the unclipped policy loss. Defaults to 0.0.
             tanh_log_policy_coef (float): Coefficient for the tanh log policy loss. Defaults to 0.0.
+            tanh_log_policy_beta (float): Beta for the tanh log policy loss. Defaults to 1.0.
             tanh_log_advantages_first (bool): If True, the log ratio is multiplied by advantages before tanh/log. Defaults to False.
             reinforce_coef (float): Coefficient for the REINFORCE loss. Defaults to 0.0.s
             clip_epsilon (float): Clipping parameter for PPO (typically between 0.1 and 0.3).
@@ -285,6 +287,7 @@ class PPOLoss(nn.Module):
         self.policy_coef = policy_coef
         self.unclipped_policy_coef = unclipped_policy_coef
         self.tanh_log_policy_coef = tanh_log_policy_coef
+        self.tanh_log_policy_beta = tanh_log_policy_beta
         self.tanh_log_advantages_first = tanh_log_advantages_first
         self.reinforce_coef = reinforce_coef
         self.clip_epsilon = clip_epsilon
@@ -544,11 +547,16 @@ class PPOLoss(nn.Module):
         # Calculate tanh log policy loss
         if self.tanh_log_advantages_first:
             tanh_log_policy_loss = (
-                -torch.tanh(log_ratio.mul(advantages)).mul(weights).sum()
+                -torch.tanh(self.tanh_log_policy_beta * log_ratio.mul(advantages))
+                .mul(weights)
+                .sum()
             )  # Scalar
         else:
             tanh_log_policy_loss = (
-                -torch.tanh(log_ratio).mul(advantages).mul(weights).sum()
+                -torch.tanh(self.tanh_log_policy_beta * log_ratio)
+                .mul(advantages)
+                .mul(weights)
+                .sum()
             )  # Scalar
 
         # Calculate REINFORCE loss
