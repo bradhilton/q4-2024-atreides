@@ -679,15 +679,24 @@ class PPOLoss(nn.Module):
                 values
                 * torch.log(
                     torch.sigmoid(
-                        self.tanh_log_policy_beta * (new_logprobs - reference_logprobs)
-                    )
+                        torch.clamp(
+                            self.tanh_log_policy_beta * (new_logprobs - reference_logprobs),
+                            min=-20.0,
+                            max=20.0,
+                        )
+                    ) + 1e-10
                 )
                 + (1 - values)
                 * torch.log(
                     1
                     - torch.sigmoid(
-                        self.tanh_log_policy_beta * (new_logprobs - reference_logprobs)
+                        torch.clamp(
+                            self.tanh_log_policy_beta * (new_logprobs - reference_logprobs),
+                            min=-20.0,
+                            max=20.0,
+                        )
                     )
+                    + 1e-10
                 )
             )
             .mul(weights)
