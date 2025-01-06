@@ -28,6 +28,8 @@ class ExploreResult:
     tensor_dir: str
     tokenizer: Tokenizer
     trajectories_per_episode: Optional[int]
+    normalize_values: bool = True
+    normalize_advantages: bool = True
     completion_tensors: dict[Completion, dict[str, torch.Tensor]] = field(
         default_factory=dict
     )
@@ -50,8 +52,10 @@ class ExploreResult:
         packed_tensors = self._write_sequence(force_write_mask=True)
         if packed_tensors is not None:
             self._write_weights(packed_tensors)
-            self._normalize(packed_tensors, "values")
-            self._normalize(packed_tensors, "advantages")
+            if self.normalize_values:
+                self._normalize(packed_tensors, "values")
+            if self.normalize_advantages:
+                self._normalize(packed_tensors, "advantages")
             # Not sure why this is necessary
             if not packed_tensors["mask"][0][0].any().item():
                 packed_tensors["mask"][0][0][0] = True

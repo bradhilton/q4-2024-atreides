@@ -1158,6 +1158,7 @@ class TuneRecipe(FTRecipeInterface):
                     entropy_to_log = per_token_result.entropy_bonus.item()
                     entropy_target_to_log = per_token_result.entropy_target_loss.item()
                     kl_div_to_log = per_token_result.kl_divergence.item()
+                    ce_to_log = per_token_result.ce_loss.item()
                     weighted_entropy_to_log = (
                         per_token_result.weighted_entropy_bonus.item()
                     )
@@ -1181,6 +1182,7 @@ class TuneRecipe(FTRecipeInterface):
                         entropy=f"{entropy_to_log:.4f}",
                         entropy_target=f"{entropy_target_to_log:.4f}",
                         kl_div=f"{kl_div_to_log:.4f}",
+                        ce=f"{ce_to_log:.4f}",
                         weighted_entropy=f"{weighted_entropy_to_log:.4f}",
                         weighted_kl_div=f"{weighted_kl_div_to_log:.4f}",
                         weighted_ce=f"{weighted_ce_to_log:.4f}",
@@ -1205,6 +1207,7 @@ class TuneRecipe(FTRecipeInterface):
                             "entropy": entropy_to_log,
                             "entropy_target": entropy_target_to_log,
                             "kl_div": kl_div_to_log,
+                            "ce": ce_to_log,
                             "weighted_entropy": weighted_entropy_to_log,
                             "weighted_kl_div": weighted_kl_div_to_log,
                             "weighted_ce": weighted_ce_to_log,

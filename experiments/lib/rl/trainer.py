@@ -86,6 +86,10 @@ class ExploreOptions:
     advantage_max_weight (float): How much weight to give to the maximum reward-to-go (instead of the Q-value) when
     computing the advantage.
 
+    normalize_values (bool): Whether to normalize the values discovered in the exploration step.
+
+    normalize_advantages (bool): Whether to normalize the advantages discovered in the exploration step.
+
     max_split_points (Optional[int]): The maximum number of points that a completion can be split per
     iteration. If None, completions may be split up to `num_parents` times.
 
@@ -121,6 +125,8 @@ class ExploreOptions:
     branch_factor: int
     advantage_max_weight: float = 0.0
     max_split_points: Optional[int] = None
+    normalize_values: bool = True
+    normalize_advantages: bool = True
     patience: float = 1.0
     recovery_pattern: Optional[Union[str, Callable[[Completion], str]]] = None
     sample_probability_power: Optional[float] = None
@@ -548,6 +554,8 @@ class Trainer:
                 if self.tune_episode_sample_fraction < 1.0
                 else None
             ),
+            normalize_values=self.explore_options.normalize_values,
+            normalize_advantages=self.explore_options.normalize_advantages,
         )
         ready_episodes = asyncio.Queue[Episode]()
         done_episodes = asyncio.Queue[Episode | BaseException]()

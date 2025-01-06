@@ -121,6 +121,7 @@ class PPOResult:
     entropy_target_weight: torch.Tensor = tensor_field()
     kl_weight: torch.Tensor = tensor_field()
     reverse_kl_weight: torch.Tensor = tensor_field()
+    ce_weight: torch.Tensor = tensor_field()
     weighted_entropy_weight: torch.Tensor = tensor_field()
     weighted_kl_weight: torch.Tensor = tensor_field()
     weighted_reverse_kl_weight: torch.Tensor = tensor_field()
@@ -137,6 +138,7 @@ class PPOResult:
     entropy_target: torch.Tensor = tensor_field()
     kl_divergence: torch.Tensor = tensor_field()
     reverse_kl_divergence: torch.Tensor = tensor_field()
+    ce_loss: torch.Tensor = tensor_field()
     weighted_entropy_bonus: torch.Tensor = tensor_field()
     weighted_kl_divergence: torch.Tensor = tensor_field()
     weighted_reverse_kl_divergence: torch.Tensor = tensor_field()
@@ -186,6 +188,7 @@ class PPOResult:
             + (self.entropy_target_weight / self.num_tokens) * self.entropy_target_loss
             + (self.kl_weight / self.num_tokens) * self.kl_divergence
             + (self.reverse_kl_weight / self.num_tokens) * self.reverse_kl_divergence
+            + (self.ce_weight / self.num_tokens) * self.ce_loss
             - (self.weighted_entropy_weight / self.num_tokens)
             * self.weighted_entropy_bonus
             + (self.weighted_kl_weight / self.num_tokens) * self.weighted_kl_divergence
@@ -228,6 +231,7 @@ class PPOLoss(nn.Module):
         entropy_target_coef: float = 0.0,
         kl_coef: float = 0.0,
         reverse_kl_coef: float = 0.0,
+        ce_coef: float = 0.0,
         weighted_entropy_coef: float = 0.0,
         weighted_kl_coef: float = 0.0,
         weighted_reverse_kl_coef: float = 0.0,
@@ -274,6 +278,7 @@ class PPOLoss(nn.Module):
             entropy_target_coef (float): Coefficient for the entropy target loss.
             kl_coef (float): Coefficient for KL divergence penalty (defaults to 0.0).
             reverse_kl_coef (float): Coefficient for reverse KL divergence penalty (defaults to 0.0).
+            ce_coef (float): Coefficient for cross entropy penalty (defaults to 0.0).
             weighted_entropy_coef (float): Coefficient for the weighted entropy bonus.
             weighted_kl_coef (float): Coefficient for the weighted KL divergence penalty.
             weighted_reverse_kl_coef (float): Coefficient for the weighted reverse KL divergence penalty.
@@ -314,6 +319,7 @@ class PPOLoss(nn.Module):
         self.entropy_target_coef = entropy_target_coef
         self.kl_coef = kl_coef
         self.reverse_kl_coef = reverse_kl_coef
+        self.ce_coef = ce_coef
         self.weighted_entropy_coef = weighted_entropy_coef
         self.weighted_kl_coef = weighted_kl_coef
         self.weighted_reverse_kl_coef = weighted_reverse_kl_coef
@@ -668,6 +674,26 @@ class PPOLoss(nn.Module):
             weights
         )  # Shape: (num_tokens,)
 
+        ce_loss = (
+            (
+                values
+                * torch.log(
+                    torch.sigmoid(
+                        self.tanh_log_policy_beta * (new_logprobs - reference_logprobs)
+                    )
+                )
+                + (1 - values)
+                * torch.log(
+                    1
+                    - torch.sigmoid(
+                        self.tanh_log_policy_beta * (new_logprobs - reference_logprobs)
+                    )
+                )
+            )
+            .mul(weights)
+            .sum()
+        )
+
         weighted_reverse_kl_divergence = reverse_kl_divergence.mul(
             -advantages
         ).sum()  # Scalar
@@ -689,6 +715,7 @@ class PPOLoss(nn.Module):
             entropy_target_weight=self.entropy_target_coef * num_tokens,
             kl_weight=self.kl_coef * num_tokens,
             reverse_kl_weight=self.reverse_kl_coef * num_tokens,
+            ce_weight=self.ce_coef * num_tokens,
             weighted_entropy_weight=self.weighted_entropy_coef * num_tokens,
             weighted_kl_weight=self.weighted_kl_coef * num_tokens,
             weighted_reverse_kl_weight=self.weighted_reverse_kl_coef * num_tokens,
@@ -705,6 +732,7 @@ class PPOLoss(nn.Module):
             entropy_target=self.entropy_target * num_tokens,
             kl_divergence=kl_divergence,
             reverse_kl_divergence=reverse_kl_divergence,
+            ce_loss=ce_loss,
             weighted_entropy_bonus=weighted_entropy_bonus,
             weighted_kl_divergence=weighted_kl_divergence,
             weighted_reverse_kl_divergence=weighted_reverse_kl_divergence,
