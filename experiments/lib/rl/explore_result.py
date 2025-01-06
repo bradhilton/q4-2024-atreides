@@ -20,7 +20,7 @@ from ..utils import truncate_pad
 class ExploreResult:
     pbar: tqdm
     max_mask_sequence_batch_size: int
-    model: str
+    models: set[str]
     abs_weighted_sum: float
     advantage_max_weight: float
     sample_probability_power: float
@@ -96,7 +96,7 @@ class ExploreResult:
                         completion.reward
                         for completion in leaf.ancestors(including_self=True)
                     )
-                    for leaf in episode.completion.leaves(model=self.model)
+                    for leaf in episode.completion.leaves(models=self.models)
                 ),
                 default=0,
             )
@@ -114,7 +114,7 @@ class ExploreResult:
         self.episodes.append(episode)
         self._update_pbar_postfix()
         termini: list[Completion] = []
-        possible_termini = episode.completion.leaves(model=self.model)
+        possible_termini = episode.completion.leaves(models=self.models)
         if self.trajectories_per_episode is not None:
             possible_termini = list(possible_termini)
             possible_termini = random.choices(
@@ -122,7 +122,7 @@ class ExploreResult:
                 weights=[
                     leaf.sample_weight(
                         cache=True,
-                        model=self.model,
+                        models=self.models,
                         power=self.sample_probability_power,
                     )
                     for leaf in possible_termini
@@ -134,7 +134,7 @@ class ExploreResult:
                 if (
                     terminus.advantage(
                         cache=True,
-                        model=self.model,
+                        models=self.models,
                         max_weight=self.advantage_max_weight,
                     )
                     != 0
@@ -221,7 +221,7 @@ class ExploreResult:
         }
         max_ancestors = (
             max(
-                root.max_depth(self.model)
+                root.max_depth(self.models)
                 for root in {completion.root() for completion in completions}
             )
             + 1
@@ -260,12 +260,12 @@ class ExploreResult:
     ) -> dict[str, torch.Tensor]:
         tokens, mask = completion.tokens_and_mask(tokenizer, cache=True)
         values = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
-        value = completion.value(cache=True, model=self.model)
+        value = completion.value(cache=True, models=self.models)
         values[mask] = torch.tensor([value for _ in range(mask.sum())])
         advantages = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
         advantages[mask] = torch.tensor(
             completion.token_advantages(
-                cache=True, model=self.model, max_weight=self.advantage_max_weight
+                cache=True, models=self.models, max_weight=self.advantage_max_weight
             )
         )
         logprobs = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
@@ -308,14 +308,14 @@ class ExploreResult:
                         if self.trajectories_per_episode is not None
                         else completion.sample_weight(
                             cache=True,
-                            model=self.model,
+                            models=self.models,
                             power=self.sample_probability_power,
                         )
                     )
                     / sequence_occurences[completion]
                 )
                 if completion.advantage(
-                    cache=True, model=self.model, max_weight=self.advantage_max_weight
+                    cache=True, models=self.models, max_weight=self.advantage_max_weight
                 )
                 != 0
                 else 0

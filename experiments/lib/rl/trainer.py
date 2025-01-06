@@ -62,7 +62,7 @@ class Eval:
 class ExploreImpl(Protocol):
     async def __call__(
         self,
-        completion_sampler: CompletionSampler,
+        completion_sampler_pool: CompletionSamplerPool,
         tokenizer: Tokenizer,
         ready_episodes: asyncio.Queue[Episode],
         done_episodes: asyncio.Queue[Episode | BaseException],
@@ -174,11 +174,6 @@ class Trainer:
         explore_options: ExploreOptions,
         explore_impl: ExploreImpl,
         force_terminate_vllms: bool = False,
-        reference_clients: Optional[AnyIterable[AsyncOpenAI]] = None,
-        reference_model: Optional[str] = None,
-        reference_model_checkpoint_files: Optional[list[str]] = None,
-        reference_roundtrips_per_episode: int = 1,
-        reference_vllm_config: Optional[vLLMConfig] = None,
         train_episodes: Episodes,
         episodes_per_iteration: Optional[int] = None,
         max_mask_sequence_batch_size: Optional[int] = None,
@@ -197,39 +192,17 @@ class Trainer:
         self.base_model = base_model
         self.output_dir = os.path.abspath(output_dir)
         os.makedirs(self.output_dir, exist_ok=True)
-        last_iteration = max(
-            (
-                int(subdir)
-                for subdir in os.listdir(self.output_dir)
-                if os.path.isdir(os.path.join(self.output_dir, subdir))
-                and subdir.isdigit()
-            ),
-            default=None,
-        )
-        self.models = [
-            (
-                f"{self.output_dir}/{last_iteration:04d}"
-                if last_iteration is not None
-                else base_model
-            )
+        self.models = [base_model] * torch.cuda.device_count() + [
+            os.path.join(self.output_dir, subdir)
+            for subdir in os.listdir(self.output_dir)
+            if os.path.isdir(os.path.join(self.output_dir, subdir)) and subdir.isdigit()
         ]
-        if self.model != base_model:
-            print(f"Resuming from {self.model}")
+        if self.latest_models != {base_model}:
+            print(f"Resuming from {self.latest_models}")
         self.base_model_checkpoint_files = base_model_checkpoint_files
         self.explore_options = explore_options
         self.explore_impl = explore_impl
         self.force_terminate_vllms = force_terminate_vllms
-        self.reference_clients = (
-            ait.cycle(reference_clients) if reference_clients else None
-        )
-        self.reference_model = reference_model or self.base_model
-        self.reference_model_checkpoint_files = reference_model_checkpoint_files or (
-            self.base_model_checkpoint_files
-            if reference_model == self.base_model
-            else None
-        )
-        self.reference_roundtrips_per_episode = reference_roundtrips_per_episode
-        self.reference_vllm_config = reference_vllm_config
         self._train_iterator = ait.cycle(train_episodes)
         self._first_train_episode: Optional[Episode] = None
         self.episodes_per_iteration: Optional[int] = (
@@ -245,14 +218,15 @@ class Trainer:
         self.eval_episodes = {eval.name: eval.episodes for eval in self.evals.values()}
         self.eval_exceptions = {eval.name: [] for eval in self.evals.values()}
         self.explore_results: list[ExploreResult] = []
-        self.torchrun_kwargs = torchrun_kwargs or (
-            {
-                "nnodes": 1,
-                "nproc_per_node": torch.cuda.device_count(),
-            }
-            if torch.cuda.device_count() > 1
-            else {}
-        )
+        self.torchrun_kwargs = torchrun_kwargs or {}
+        # or (
+        #     {
+        #         "nnodes": 1,
+        #         "nproc_per_node": torch.cuda.device_count(),
+        #     }
+        #     if torch.cuda.device_count() > 1
+        #     else {}
+        # )
         self.tune_episode_sample_fraction = tune_episode_sample_fraction
         self.tune_model = tune_model
         self.tune_model_type = tune_model_type
@@ -262,7 +236,7 @@ class Trainer:
         self.tune_sequence_length = tune_sequence_length
         self.vllm_config = vllm_config or vLLMConfig()
         self._vllm_task: Optional[asyncio.Task[list[vLLM]]] = None
-        self._completion_sampler: Optional[CompletionSampler] = None
+        self._completion_sampler_pool: Optional[CompletionSamplerPool] = None
         self.tokenizer = Tokenizer(base_model)
         self._substitute_episodes: dict[Episode, Episode] = {}
         try:
@@ -280,8 +254,8 @@ class Trainer:
         )
 
     @property
-    def model(self) -> str:
-        return self.models[-1]
+    def latest_models(self) -> set[str]:
+        return set(self.models[-torch.cuda.device_count() :])
 
     async def train(self, iterations: int, verbosity: Verbosity = 2) -> None:
         for _ in range(iterations):
@@ -348,9 +322,47 @@ class Trainer:
             if return_exceptions:
                 return None, []
             return None
-        completion_sampler = await self.get_completion_sampler(verbosity=verbosity)
+        pool = await self.get_completion_sampler_pool(verbosity=verbosity)
+        results = await asyncio.gather(
+            *(
+                self._eval(
+                    eval_name,
+                    (pbar_position or 0) * len(pool.samplers) + id,
+                    id,
+                    completion_sampler,
+                    return_exceptions,
+                    verbosity,
+                )
+                for id, completion_sampler in enumerate(pool.samplers)
+            )
+        )
+        if return_exceptions:
+            scores = [
+                result[0]
+                for result in results
+                if isinstance(result, tuple) and isinstance(result[0], float)
+            ]
+            return sum(scores) / max(len(scores), 1), [
+                exception
+                for result in (
+                    result for result in results if isinstance(result, tuple)
+                )
+                for exception in result[1]
+            ]
+        scores = [result for result in results if isinstance(result, float)]
+        return sum(scores) / max(len(scores), 1)
+
+    async def _eval(
+        self,
+        eval_name: str,
+        pbar_position: int,
+        id: int,
+        completion_sampler: CompletionSampler,
+        return_exceptions: bool,
+        verbosity: Verbosity,
+    ) -> Union[Optional[float], tuple[Optional[float], list[BaseException]]]:
         pbar = self.tqdm(
-            desc=eval_name,
+            desc=f"{eval_name}/{id}",
             total=getattr(self.eval_episodes[eval_name], "__len__", lambda: None)(),
             unit="episode",
             dynamic_ncols=True,
@@ -360,6 +372,7 @@ class Trainer:
         tasks: list[asyncio.Task] = []
         episodes: list[Episode] = []
         exceptions: list[BaseException] = []
+        model = await completion_sampler.get_model()
 
         def num_episodes_with_model_completions() -> int:
             return (
@@ -367,8 +380,7 @@ class Trainer:
                     1
                     for episode in episodes
                     if any(
-                        child.model == self.model
-                        for child in episode.completion.children
+                        child.model == model for child in episode.completion.children
                     )
                 )
                 or 1
@@ -377,7 +389,7 @@ class Trainer:
         def num_model_completions() -> int:
             return (
                 sum(
-                    sum(1 for _ in episode.completion.leaves(model=self.model))
+                    sum(1 for _ in episode.completion.leaves(models={model}))
                     for episode in episodes
                 )
                 or 1
@@ -386,7 +398,7 @@ class Trainer:
         def get_avg_score() -> float:
             return (
                 sum(
-                    episode.completion.value(cache=True, model=self.model)
+                    episode.completion.value(cache=True, models={model})
                     for episode in episodes
                 )
                 / num_episodes_with_model_completions()
@@ -401,7 +413,7 @@ class Trainer:
                                 completion.reward
                                 for completion in leaf.ancestors(including_self=True)
                             )
-                            for leaf in episode.completion.leaves(model=self.model)
+                            for leaf in episode.completion.leaves(models={model})
                         ),
                         default=0,
                     )
@@ -415,7 +427,7 @@ class Trainer:
                 sum(
                     leaf.all_entropy(cache=True)
                     for episode in episodes
-                    for leaf in episode.completion.leaves(model=self.model)
+                    for leaf in episode.completion.leaves(models={model})
                 )
                 / num_model_completions()
             )
@@ -425,7 +437,7 @@ class Trainer:
                 sum(
                     leaf.all_num_token_logprobs()
                     for episode in episodes
-                    for leaf in episode.completion.leaves(model=self.model)
+                    for leaf in episode.completion.leaves(models={model})
                 )
                 / num_model_completions()
             )
@@ -466,7 +478,7 @@ class Trainer:
                     branch_factor=samples,
                     sampling_kwargs=sampling_kwargs,
                 )
-                if episode.num_samples(model=self.model) < samples
+                if episode.num_samples(models={model}) < samples
                 else maybe_await(True)
             )
             task.add_done_callback(done_callback)
@@ -495,11 +507,11 @@ class Trainer:
                     raise exception
         pbar.close()
         avg_score = get_avg_score()
-        if self.model not in self.eval_results[eval_name]:
+        if model not in self.eval_results[eval_name]:
             max_score = get_max_score()
             entropy = get_entropy()
             avg_tokens = get_avg_tokens()
-            self.eval_results[eval_name][self.model] = {
+            self.eval_results[eval_name][model] = {
                 "avg": avg_score,
                 "max": max_score,
                 "entropy": entropy,
@@ -508,10 +520,10 @@ class Trainer:
             if self._wandb_run:
                 wandb.log(
                     {
-                        f"{eval_name}/avg": avg_score,
-                        f"{eval_name}/max": max_score,
-                        f"{eval_name}/entropy": entropy,
-                        f"{eval_name}/tokens": avg_tokens,
+                        f"{eval_name}/{id}/avg": avg_score,
+                        f"{eval_name}/{id}/max": max_score,
+                        f"{eval_name}/{id}/entropy": entropy,
+                        f"{eval_name}/{id}/tokens": avg_tokens,
                     }
                 )
         self.eval_exceptions[eval_name].extend(exceptions)
@@ -526,7 +538,7 @@ class Trainer:
         return_exceptions: bool = True,
         verbosity: Verbosity = 2,
     ) -> ExploreResult:
-        completion_sampler = await self.get_completion_sampler(verbosity=verbosity)
+        pool = await self.get_completion_sampler_pool(verbosity=verbosity)
         pbar = self.tqdm(
             desc="explore",
             total=self.episodes_per_iteration,
@@ -540,7 +552,7 @@ class Trainer:
         result = ExploreResult(
             pbar=pbar,
             max_mask_sequence_batch_size=self.max_mask_sequence_batch_size,
-            model=self.model,
+            models=self.latest_models,
             abs_weighted_sum=200_000.0,
             advantage_max_weight=self.explore_options.advantage_max_weight,
             sample_probability_power=self.explore_options.get_sample_probability_power(),
@@ -561,7 +573,7 @@ class Trainer:
         done_episodes = asyncio.Queue[Episode | BaseException]()
         explore_task = asyncio.create_task(
             self.explore_impl(
-                completion_sampler,
+                pool,
                 self.tokenizer,
                 ready_episodes,
                 done_episodes,
@@ -621,149 +633,29 @@ class Trainer:
         self.explore_results.append(result)
         return result.completed()
 
-    # async def _explore_episode(
-    #     self, episode: Episode, pbar: tqdm, priority: int
-    # ) -> Episode:
-    #     if episode in self._substitute_episodes:
-    #         return await self._explore_episode(
-    #             self._substitute_episodes[episode], pbar, priority
-    #         )
-    #     completion_sampler = await self.get_completion_sampler()
-    #     for iteration in range(self.explore_options.iterations):
-    #         await episode.sample_completions(
-    #             completion_sampler=completion_sampler,
-    #             tokenizer=self.tokenizer,
-    #             num_parents=self.explore_options.num_parents,
-    #             branch_factor=self.explore_options.branch_factor,
-    #             get_recovery_pattern=self.explore_options.get_recovery_pattern,
-    #             max_splits_per_completion=self.explore_options.max_split_points
-    #             or self.explore_options.num_parents,
-    #             priority=priority,
-    #             sample_probability_power=self.explore_options.get_sample_probability_power(),
-    #             sampling_kwargs=self.explore_options.sampling_kwargs,
-    #             split_by=self.explore_options.split_method,
-    #             split_separators=self.explore_options.split_separators,
-    #         )
-    #         if iteration == 0 and all(
-    #             c.advantage(cache=True, model=self.model) == 0
-    #             for c in episode.completion.children
-    #             if c.model == self.model
-    #         ):
-    #             if (
-    #                 episode.get_easier_episode
-    #                 and episode.min_value is not None
-    #                 and episode.completion.value(cache=True, model=self.model)
-    #                 <= episode.min_value
-    #             ):
-    #                 substitute = await maybe_await(episode.get_easier_episode())
-    #             elif (
-    #                 episode.get_harder_episode
-    #                 and episode.max_value is not None
-    #                 and episode.completion.value(cache=True, model=self.model)
-    #                 >= episode.max_value
-    #             ):
-    #                 substitute = await maybe_await(episode.get_harder_episode())
-    #             elif episode.get_similar_episode:
-    #                 substitute = await maybe_await(episode.get_similar_episode())
-    #             else:
-    #                 continue
-    #             self._substitute_episodes[episode] = substitute
-    #             return await self._explore_episode(substitute, pbar, priority)
-    #         pbar.update(
-    #             1
-    #             / self.explore_options.iterations
-    #             / (
-    #                 2
-    #                 if self.reference_clients and self.reference_model != self.model
-    #                 else 1
-    #             )
-    #         )
-    #     if self.reference_clients and self.reference_model != self.model:
-    #         await self._get_episode_reference_logprobs(
-    #             episode, client=await anext(self.reference_clients)
-    #         )
-    #         pbar.update(0.5)
-    #     return episode
-
-    async def _get_episode_reference_logprobs(
-        self,
-        episode: Episode,
-        client: AsyncOpenAI,
-    ) -> Episode:
-        leaves = list(episode.completion.leaves(model=self.model))
-        for offset in range(self.reference_roundtrips_per_episode):
-            await asyncio.gather(
-                *(
-                    self._get_completion_reference_logprobs(leaf, client)
-                    for leaf in leaves[offset :: self.reference_roundtrips_per_episode]
-                )
-            )
-        return episode
-
-    async def _get_completion_reference_logprobs(
-        self,
-        completion: Completion,
-        client: AsyncOpenAI,
-    ) -> None:
-        tokens = completion.all_tokens(self.tokenizer, cache=True).tolist()
-        async with get_semaphore(client):
-            plain_completion = await client.completions.create(
-                model=self.reference_model,
-                prompt=tokens,
-                max_tokens=1,
-                extra_body={
-                    "prompt_logprobs": True,
-                },
-            )
-        prompt_logprobs: list[dict[str, dict[str, Any]]] = plain_completion.choices[0].prompt_logprobs  # type: ignore
-        reference_logprobs = [
-            (prompt_logprob[str(token)]["logprob"] if prompt_logprob else torch.nan)
-            for token, prompt_logprob in zip(tokens, prompt_logprobs)
-        ]
-        for completion in completion.ancestors(including_self=True, reverse=True):
-            count = completion.token_count(self.tokenizer, cache=True)
-            completion.reference_logprobs, reference_logprobs = (
-                torch.tensor(reference_logprobs[:count]),
-                reference_logprobs[count:],
-            )
-
-    # def tensors(self, episodes: list[Episode]) -> PackedTensors:
-    #     return packed_tensors(
-    #         episodes,
-    #         model=self.model,
-    #         sample_probability_power=self.explore_options.get_sample_probability_power(),
-    #         sequence_length=self.tune_sequence_length,
-    #         trajectories_per_episode=(
-    #             int(
-    #                 self.explore_options.num_samples * self.tune_episode_sample_fraction
-    #             )
-    #             if self.tune_episode_sample_fraction < 1.0
-    #             else None
-    #         ),
-    #         tokenizer=self.tokenizer,
-    #     )
-
     async def tune(self, result: ExploreResult, *, verbosity: Verbosity = 2) -> None:
         print(f"Tuning model on {len(result.sequences)} sequences")
         await self.stop_vllms()
-        if (
-            not self.reference_clients
-            and self.reference_model != self.model
-            and self.reference_vllm_config
-        ):
-            await self._get_reference_logprobs(
-                result, verbosity, self.reference_vllm_config
-            )
-            await self.stop_vllms()
-        checkpoint_dir = await self._get_checkpoint_dir(self.model)
+        await asyncio.gather(
+            *[
+                self._tune_model(result, model, device, verbosity)
+                for device, model in enumerate(self.latest_models)
+            ]
+        )
+
+    async def _tune_model(
+        self, result: ExploreResult, model: str, device: int, verbosity: Verbosity
+    ) -> None:
+        checkpoint_dir = await self._get_checkpoint_dir(model)
+        output_subdir = f"/cuda:{device}"
+        os.makedirs(self.output_dir + output_subdir, exist_ok=True)
         self.tune_recipe_config.checkpointer = self._get_checkpointer_config(
             checkpoint_dir,
             checkpoint_files=(
-                self.base_model_checkpoint_files
-                if self.model != self.base_model
-                else None
+                self.base_model_checkpoint_files if model != self.base_model else None
             ),
             mlp_head_checkpointer=True,
+            output_subdir=output_subdir,
         )
         if not self.tune_recipe_config.metric_logger:
             self.tune_recipe_config.metric_logger = (
@@ -775,27 +667,21 @@ class Trainer:
         self.tune_recipe_config.dataset = ComponentConfig(
             PackedDataset, **result.disk_packed_tensors(drop_last=True)
         )
-        if (
-            not self.reference_clients
-            # and self.reference_model != self.model
-            and not self.reference_vllm_config
-        ):
-            self.tune_recipe_config.reference_checkpointer = (
-                self._get_checkpointer_config(
-                    await self._get_checkpoint_dir(self.reference_model),
-                    checkpoint_files=self.reference_model_checkpoint_files,
-                )
-            )
+        self.tune_recipe_config.reference_checkpointer = self._get_checkpointer_config(
+            await self._get_checkpoint_dir(self.base_model),
+            checkpoint_files=self.base_model_checkpoint_files,
+        )
         if self.tune_run:
-            await self._tune_run(verbosity)
+            await self._tune_run(device, verbosity)
         else:
             cleanup_before_training()
             recipe_main(self.tune_recipe_config)
-        self._save(checkpoint_dir)
+        self._save(checkpoint_dir, output_subdir)
 
-    async def _tune_run(self, verbosity: Verbosity) -> None:
+    async def _tune_run(self, device: int, verbosity: Verbosity) -> None:
         dict_config = self.tune_recipe_config.dict_config()
-        OmegaConf.save(dict_config, self.output_dir + "/config.yaml")
+        config_path = self.output_dir + f"/cuda:{device}/config.yaml"
+        OmegaConf.save(dict_config, config_path)
         args = [
             "tune",
             "run",
@@ -805,7 +691,7 @@ class Trainer:
             ],
             "lib.rl.recipe.TuneRecipe",
             "--config",
-            self.output_dir + "/config.yaml",
+            config_path,
         ]
         if verbosity > 0:
             print(f"$ {' '.join(args)}")
@@ -816,6 +702,7 @@ class Trainer:
             env={
                 **os.environ,
                 **self.tune_run_env,
+                "CUDA_VISIBLE_DEVICES": str(device),
             },
         )
 
@@ -850,40 +737,6 @@ class Trainer:
             tasks.append(asyncio.create_task(log_output(process.stderr, sys.stderr)))
         _ = await asyncio.gather(*tasks)
 
-    async def _get_reference_logprobs(
-        self, result: ExploreResult, verbosity: Verbosity, vllm_config: vLLMConfig
-    ) -> None:
-        reference_clients = it.cycle(
-            vllm.client
-            for vllm in await self.get_or_start_vllms(
-                model=self.reference_model,
-                config=vllm_config,
-                verbosity=verbosity,
-            )
-        )
-        exceptions: list[BaseException] = []
-        pbar = self.tqdm(
-            desc="reference logprobs",
-            total=len(result.episodes),
-            unit="episode",
-            dynamic_ncols=True,
-            disable=not verbosity,
-        )
-        for future in asyncio.as_completed(
-            self._get_episode_reference_logprobs(episode, client)
-            for episode, client in zip(result.episodes, reference_clients)
-        ):
-            try:
-                episode = await future
-                for completion in episode.completion.descendants(including_self=True):
-                    result.write_reference_logprobs(completion)
-            except BaseException as exception:
-                exceptions.append(exception)
-            pbar.update(1)
-            pbar.set_postfix(exceptions=len(exceptions))
-        result.exceptions.extend(exceptions)
-        pbar.close()
-
     async def _get_checkpoint_dir(self, model: str) -> str:
         if os.path.exists(os.path.abspath(model)):
             return os.path.abspath(model)
@@ -900,6 +753,7 @@ class Trainer:
         checkpoint_dir: str,
         checkpoint_files: Optional[list[str]],
         mlp_head_checkpointer: bool = False,
+        output_subdir: str = "",
     ) -> ComponentConfig[FullModelHFCheckpointer]:
         return ComponentConfig(
             MLPHeadCheckpointer if mlp_head_checkpointer else FullModelHFCheckpointer,
@@ -912,18 +766,20 @@ class Trainer:
                 if not file.endswith("mlp_head.pt")
             ],
             recipe_checkpoint=None,
-            output_dir=self.output_dir,
+            output_dir=self.output_dir + output_subdir,
             model_type=self.tune_model_type,
         )
 
-    def _save(self, base_checkpoint_dir: str) -> None:
+    def _save(self, base_checkpoint_dir: str, output_subdir: str) -> None:
         # Find the latest epoch number from model checkpoint files
         epoch = max(
             (
                 int(result.group(1))
                 for result in (
                     re.search(r"hf_model_\d+_(\d+)\.pt", file)
-                    for file in glob.glob(f"{self.output_dir}/hf_model_*_*.pt")
+                    for file in glob.glob(
+                        f"{self.output_dir}{output_subdir}/hf_model_*_*.pt"
+                    )
                 )
                 if result
             ),
@@ -967,51 +823,55 @@ class Trainer:
         for src in [
             path
             for extension in ("pt", "pt.ignore")
-            for path in glob.glob(f"{self.output_dir}/*_{epoch}.{extension}")
+            for path in glob.glob(
+                f"{self.output_dir}{output_subdir}/*_{epoch}.{extension}"
+            )
         ]:
             dst = f"{iteration_dir}/{os.path.basename(src).replace(f'_{epoch}.pt', '.pt')}"
             shutil.move(src, dst)
 
-        # Delete remaining model checkpoint files in checkpoint_output_dir root
-        for file in glob.glob(f"{self.output_dir}/*.pt"):
-            if os.path.isfile(file):
-                os.remove(file)
+        # Delete entire output subdirectory
+        output_subdir_path = f"{self.output_dir}{output_subdir}"
+        if os.path.exists(output_subdir_path):
+            shutil.rmtree(output_subdir_path)
 
         print(f"Saved iteration {iteration} model files to {model_name}")
         self.models.append(model_name)
 
-    async def get_completion_sampler(
+    async def get_completion_sampler_pool(
         self, *, verbosity: Verbosity = 2
-    ) -> CompletionSampler:
+    ) -> CompletionSamplerPool:
         if not self._vllm_task:
-            self._completion_sampler = None
-        if self._completion_sampler:
-            return self._completion_sampler
+            self._completion_sampler_pool = None
+        if self._completion_sampler_pool:
+            return self._completion_sampler_pool
         vllms = await self.get_or_start_vllms(
-            model=self.model, config=self.vllm_config, verbosity=verbosity
+            models=list(self.latest_models),
+            config=self.vllm_config,
+            verbosity=verbosity,
         )
-        if self._completion_sampler:
-            return self._completion_sampler
-        self._completion_sampler = CompletionSamplerPool(
+        if self._completion_sampler_pool:
+            return self._completion_sampler_pool
+        self._completion_sampler_pool = CompletionSamplerPool(
             [
                 CompletionSampler(
                     vllm.client,
                     max_concurrent_tokens=vllm.max_concurrent_tokens,
                     min_time_between_requests=self.vllm_config.min_time_between_requests,
-                    model=self.model,
+                    model=model,
                 )
-                for vllm in vllms
+                for vllm, model in zip(vllms, self.latest_models)
             ]
         )
-        return self._completion_sampler
+        return self._completion_sampler_pool
 
     async def get_or_start_vllms(
-        self, *, model: str, config: vLLMConfig, verbosity: Verbosity = 2
+        self, *, models: list[str], config: vLLMConfig, verbosity: Verbosity = 2
     ) -> list[vLLM]:
         if not self._vllm_task:
             self._vllm_task = asyncio.create_task(
                 start_vllms(
-                    model=model,
+                    models=models,
                     n=config.num,
                     timeout=config.timeout,
                     env=config.env,

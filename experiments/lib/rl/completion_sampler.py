@@ -221,7 +221,13 @@ class CompletionSampler:
                 )
                 for completion in completions
             ]
-        if recovery_pattern and parent.advantage(cache=True) < 0:
+        if (
+            recovery_pattern
+            and parent.advantage(
+                cache=True, models={self.model} if self.model else None
+            )
+            < 0
+        ):
             patterns = Counter(
                 await asyncio.gather(
                     *(
@@ -464,5 +470,7 @@ class CompletionSamplerPool(CompletionSampler):
             **kwargs,
         )
 
-    async def get_model(self) -> str:
-        return await self.samplers[0].get_model()
+    async def get_models(self) -> set[str]:
+        return set(
+            await asyncio.gather(*(sampler.get_model() for sampler in self.samplers))
+        )

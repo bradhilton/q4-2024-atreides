@@ -83,9 +83,13 @@ class Completion:
         self.fork = fork
         self.logprobs_mask = logprobs_mask or set()
         self.reference_logprobs: Optional[torch.Tensor] = None
-        self._cached_values: dict[tuple[Optional[str], Optional[bool]], float] = {}
-        self._cached_max_values: dict[Optional[str], float] = {}
-        self._cached_sample_weights: dict[tuple[Optional[str], float], float] = {}
+        self._cached_values: dict[
+            tuple[Optional[frozenset[str]], Optional[bool]], float
+        ] = {}
+        self._cached_max_values: dict[Optional[frozenset[str]], float] = {}
+        self._cached_sample_weights: dict[
+            tuple[Optional[frozenset[str]], float], float
+        ] = {}
         self._cached_tokens_and_mask: Optional[tuple[torch.Tensor, torch.Tensor]] = None
         self._cached_entropy_sum: Optional[float] = None
         self._cached_split_weights: dict[
@@ -120,8 +124,8 @@ class Completion:
 
     def value(
         self,
-        cache: bool = False,
-        model: Optional[str] = None,
+        cache: bool,
+        models: Optional[set[str]],
         fork: Optional[bool] = None,
     ) -> float:
         """
@@ -132,54 +136,56 @@ class Completion:
 
         Args:
             cache (bool): Whether to cache Q-value estimates for faster retrieval.
-            model (Optional[str]): Optionally limit child Q-value estimates to a specific model.
+            models (Optional[set[str]]): Optionally limit child Q-value estimates to specific models.
             fork (Optional[bool]): Optionally limit child Q-value estimates to only forked or unforked completions.
 
         Returns:
             float: Estimated Q-value for the state-action pair.
         """
-        if cache and (model, fork) in self._cached_values:
-            return self._cached_values[(model, fork)]
+        cache_key = (frozenset(models) if models else None, fork)
+        if cache and cache_key in self._cached_values:
+            return self._cached_values[cache_key]
         child_values = [
-            completion.value(cache=cache, model=model, fork=fork)
+            completion.value(cache=cache, models=models, fork=fork)
             for completion in self.children
-            if (model is None or completion.model is None or completion.model == model)
+            if completion.matches_models(models)
             and (fork is None or completion.fork == fork)
         ]
         value = self.reward + (sum(child_values) / max(len(child_values), 1))
         if cache:
-            self._cached_values[(model, fork)] = value
+            self._cached_values[cache_key] = value
         return value
 
-    def max_value(self, cache: bool = False, model: Optional[str] = None) -> float:
+    def max_value(self, cache: bool, models: Optional[set[str]]) -> float:
         """
         Returns the maximum reward-to-go for this completion.
         """
-        if cache and model in self._cached_max_values:
-            return self._cached_max_values[model]
+        cache_key = frozenset(models) if models else None
+        if cache and cache_key in self._cached_max_values:
+            return self._cached_max_values[cache_key]
         max_value = self.reward + (
-            max(child.max_value(cache=cache, model=model) for child in self.children)
+            max(child.max_value(cache=cache, models=models) for child in self.children)
             if self.children
             else 0.0
         )
         if cache:
-            self._cached_max_values[model] = max_value
+            self._cached_max_values[cache_key] = max_value
         return max_value
 
     def weighted_value(
         self,
-        cache: bool = False,
-        model: Optional[str] = None,
-        max_weight: float = 0.0,
+        cache: bool,
+        models: Optional[set[str]],
+        max_weight: float,
     ) -> float:
         return (1 - max_weight) * self.value(
-            cache=cache, model=model
-        ) + max_weight * self.max_value(cache=cache, model=model)
+            cache=cache, models=models
+        ) + max_weight * self.max_value(cache=cache, models=models)
 
     def advantage(
         self,
-        cache: bool = False,
-        model: Optional[str] = None,
+        cache: bool,
+        models: Optional[set[str]],
         max_weight: float = 0.0,
     ) -> float:
         """
@@ -199,10 +205,10 @@ class Completion:
         if self.parent is None:
             return 0.0
         return (
-            self.weighted_value(cache=cache, model=model, max_weight=max_weight)
+            self.weighted_value(cache=cache, models=models, max_weight=max_weight)
             - (
                 self.parent.weighted_value(
-                    cache=cache, model=model, max_weight=max_weight
+                    cache=cache, models=models, max_weight=max_weight
                 )
                 - self.parent.reward
             )
@@ -227,17 +233,19 @@ class Completion:
     # def adjusted_advantage(self, lambda_: float = 1.0) -> float:
     #     return self.advantage() * self.adjustment(lambda_)
 
-    def all_abs_advantage(self, cache: bool = False) -> float:
-        return abs(self.advantage(cache=cache)) + (
-            self.parent.all_abs_advantage(cache=cache) if self.parent else 0
-        )
+    # def all_abs_advantage(self, cache: bool, model: Optional[str]) -> float:
+    #     return abs(self.advantage(cache=cache, model=model)) + (
+    #         self.parent.all_abs_advantage(cache=cache, model=model)
+    #         if self.parent
+    #         else 0
+    #     )
 
-    def all_abs_advantage_per_token(
-        self, tokenizer: Tokenizer, cache: bool = False
-    ) -> float:
-        return self.all_abs_advantage(cache=cache) / self.all_token_count(
-            tokenizer, cache=cache
-        )
+    # def all_abs_advantage_per_token(
+    #     self, tokenizer: Tokenizer, cache: bool, model: Optional[str]
+    # ) -> float:
+    #     return self.all_abs_advantage(cache=cache, model=model) / self.all_token_count(
+    #         tokenizer, cache=cache
+    #     )
 
     def ancestors(
         self, including_self: bool = False, reverse: bool = False
@@ -252,34 +260,43 @@ class Completion:
     def cumulative_reward(self) -> float:
         return self.reward + (self.parent.cumulative_reward() if self.parent else 0)
 
-    def matches_model(self, model: Optional[str]) -> bool:
-        return not model or not self.model or self.model == model
+    def matches_models(self, models: Optional[set[str]]) -> bool:
+        return not models or not self.model or self.model in models
 
     def descendants(
-        self, including_self: bool = False, model: Optional[str] = None
+        self,
+        models: Optional[set[str]],
+        including_self: bool = False,
     ) -> Iterable["Completion"]:
-        if including_self and self.matches_model(model):
+        if including_self and self.matches_models(models):
             yield self
         for child in self.children:
-            yield from child.descendants(including_self=True, model=model)
+            yield from child.descendants(
+                including_self=True,
+                models=models,
+            )
 
-    def leaves(self, model: Optional[str] = None) -> Iterable["Completion"]:
-        if not self.children and self.matches_model(model):
+    def leaves(self, models: Optional[set[str]]) -> Iterable["Completion"]:
+        if not self.children and self.matches_models(models):
             yield self
         for child in self.children:
-            yield from child.leaves(model=model)
+            yield from child.leaves(models=models)
 
     def depth(self) -> int:
         return 1 + self.parent.depth() if self.parent else 0
 
-    def depths(self, depth: int = 0, model: Optional[str] = None) -> Iterable[int]:
-        if self.matches_model(model):
+    def depths(
+        self,
+        models: Optional[set[str]],
+        depth: int = 0,
+    ) -> Iterable[int]:
+        if self.matches_models(models):
             yield depth
         for child in self.children:
-            yield from child.depths(depth + 1, model=model)
+            yield from child.depths(models=models, depth=depth + 1)
 
-    def max_depth(self, model: Optional[str] = None) -> int:
-        return max(self.depths(model=model), default=0)
+    def max_depth(self, models: Optional[set[str]]) -> int:
+        return max(self.depths(models=models), default=0)
 
     def absent_stop_tokens(self) -> int:
         return sum(
@@ -590,7 +607,9 @@ class Completion:
             return self
         completion = Completion(
             parent=(
-                self.parent.recursive_copy(commit=False, copy_root=copy_root)
+                self.parent.recursive_copy(
+                    commit=False, copy_root=copy_root, model=model
+                )
                 if self.parent
                 else None
             ),
@@ -609,17 +628,15 @@ class Completion:
     def root(self) -> "Completion":
         return self.parent.root() if self.parent else self
 
-    def token_advantage(
-        self, cache: bool = False, model: Optional[str] = None
-    ) -> float:
-        return self.advantage(cache=cache, model=model) / (
+    def token_advantage(self, cache: bool, models: Optional[set[str]]) -> float:
+        return self.advantage(cache=cache, models=models) / (
             self.num_token_logprobs() or 1
         )
 
     def token_advantages(
-        self, cache: bool = False, model: Optional[str] = None, max_weight: float = 0.0
+        self, cache: bool, models: Optional[set[str]], max_weight: float = 0.0
     ) -> list[float]:
-        advantage = self.advantage(cache=cache, model=model, max_weight=max_weight)
+        advantage = self.advantage(cache=cache, models=models, max_weight=max_weight)
         token_logprobs = [
             token_logprob
             for token_logprobs in self._token_logprob_sequences()
@@ -636,14 +653,14 @@ class Completion:
         return token_advantages
 
     def all_token_advantages(
-        self, cache: bool = False, model: Optional[str] = None
+        self, cache: bool, models: Optional[set[str]]
     ) -> Iterable[float]:
         if self.parent:
-            yield from self.parent.all_token_advantages(cache=cache, model=model)
-        yield from self.token_advantages(cache=cache, model=model)
+            yield from self.parent.all_token_advantages(cache=cache, models=models)
+        yield from self.token_advantages(cache=cache, models=models)
 
     def tokens_and_mask(
-        self, tokenizer: Tokenizer, *, cache: bool = False
+        self, tokenizer: Tokenizer, *, cache: bool
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if cache and self._cached_tokens_and_mask is not None:
             return self._cached_tokens_and_mask
@@ -710,20 +727,15 @@ class Completion:
             self._cached_tokens_and_mask = tokens_and_mask
         return tokens_and_mask
 
-    def token_count(self, tokenizer: Tokenizer, *, cache: bool = False) -> int:
+    def token_count(self, tokenizer: Tokenizer, *, cache: bool) -> int:
         return self.tokens_and_mask(tokenizer, cache=cache)[0].size(0)
 
-    def all_token_count(self, tokenizer: Tokenizer, *, cache: bool = False) -> int:
+    def all_token_count(self, tokenizer: Tokenizer, *, cache: bool) -> int:
         return self.token_count(tokenizer, cache=cache) + (
             self.parent.all_token_count(tokenizer, cache=cache) if self.parent else 0
         )
 
-    def tokens(
-        self,
-        tokenizer: Tokenizer,
-        *,
-        cache: bool = False,
-    ) -> torch.Tensor:
+    def tokens(self, tokenizer: Tokenizer, *, cache: bool) -> torch.Tensor:
         return self.tokens_and_mask(tokenizer, cache=cache)[0]
 
     def all_tokens(self, tokenizer: Tokenizer, *, cache: bool = False) -> torch.Tensor:
@@ -737,20 +749,21 @@ class Completion:
         return self.tokens(tokenizer, cache=cache)
 
     def sample_weight(
-        self, cache: bool = False, model: Optional[str] = None, power: float = 1.0
+        self, cache: bool, models: Optional[set[str]], power: float
     ) -> float:
-        if not self.matches_model(model):
+        if not self.matches_models(models):
             return 0.0
         if not self.parent or not power:
             return 1.0
-        if cache and (model, power) in self._cached_sample_weights:
-            return self._cached_sample_weights[(model, power)]
+        cache_key = (frozenset(models) if models else None, power)
+        if cache and cache_key in self._cached_sample_weights:
+            return self._cached_sample_weights[cache_key]
         weight = (
-            self.parent.sample_weight(cache=cache, model=model, power=power)
-            / sum(child.matches_model(model) for child in self.parent.children)
+            self.parent.sample_weight(cache=cache, models=models, power=power)
+            / sum(child.matches_models(models) for child in self.parent.children)
         ) ** power
         if cache:
-            self._cached_sample_weights[(model, power)] = weight
+            self._cached_sample_weights[cache_key] = weight
         return weight
 
     def max_splits(
@@ -895,7 +908,7 @@ class Completion:
                 return
 
     def _split_weights(
-        self, by: SplitMethod, separators: Optional[set[str]], *, cache: bool = False
+        self, by: SplitMethod, separators: Optional[set[str]], *, cache: bool
     ) -> list[float]:
         if cache:
             cache_key = (by, frozenset(separators) if separators else None)
@@ -968,11 +981,16 @@ class Completion:
         return id(self)
 
     def html(
-        self, scale_colors: float, cache: bool = False, model: Optional[str] = None
+        self,
+        scale_colors: float,
+        cache: bool = False,
+        models: Optional[set[str]] = None,
     ) -> str:
         if not self.messages:
             return ""
-        token_advantage = self.token_advantage(cache=cache, model=model) * scale_colors
+        token_advantage = (
+            self.token_advantage(cache=cache, models=models) * scale_colors
+        )
         color = f"rgba({255 if token_advantage < 0 else 0},0,{255 if token_advantage > 0 else 0}, {abs(token_advantage)})"
         html = (
             self.parent.html(scale_colors=scale_colors, cache=cache)

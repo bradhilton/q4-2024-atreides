@@ -218,7 +218,7 @@ async def start_vllm(
 
 
 async def start_vllms(
-    model: str,
+    models: list[str],
     n: int,
     timeout: float = 120.0,
     env: Optional[dict[str, str]] = None,
@@ -254,7 +254,7 @@ async def start_vllms(
     vllms = await asyncio.gather(
         *(
             start_vllm(
-                model,
+                models[i % len(models)],
                 timeout,
                 {**env, "CUDA_VISIBLE_DEVICES": cuda_visible_devices},
                 max_concurrent_requests,

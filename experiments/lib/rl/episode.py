@@ -139,10 +139,10 @@ class Episode:
     def __hash__(self) -> int:
         return id(self)
 
-    def num_samples(self, model: Optional[str] = None) -> int:
+    def num_samples(self, models: Optional[set[str]] = None) -> int:
         if len(self.completion.children) == 0:
             return 0
-        return sum(1 for _ in self.completion.leaves(model=model))
+        return sum(1 for _ in self.completion.leaves(models=models))
 
     async def sample_completions(
         self,
@@ -187,7 +187,7 @@ class Episode:
                 branch_factor,
                 num_parents,
                 max_splits_per_completion,
-                model,
+                {model},
                 sample_probability_power,
                 split_by,
                 split_point_std_deviation,
@@ -224,7 +224,7 @@ class Episode:
         branch_factor: int,
         num_parents: int,
         max_splits_per_completion: int,
-        model: str,
+        models: set[str],
         sample_probability_power: float,
         split_method: SplitMethod,
         split_point_std_deviation: float,
@@ -240,7 +240,7 @@ class Episode:
             branch_factor: The number of completions to sample per parent.
             num_parents: The number of parents to sample completions from.
             max_splits_per_completion: The maximum number of splits to perform on a single completion.
-            model: The model to use.
+            models: The models to use.
             sample_probability_power: The power to use for the sample probability.
             split: Whether to split the completions.
             split_method: The method to use for splitting.
@@ -251,9 +251,9 @@ class Episode:
             A list of completions to sample from.
         """
         get_split_value: Callable[[Completion], float] = lambda c: (
-            abs(c.advantage(cache=True, model=model))
+            abs(c.advantage(cache=True, models=models))
             * (c.split_weight(by=split_method, cache=True) / c.num_token_logprobs())
-            * c.sample_weight(cache=True, model=model, power=sample_probability_power)
+            * c.sample_weight(cache=True, models=models, power=sample_probability_power)
         )
 
         # Create a Counter to track the number of times each completion is selected
@@ -287,7 +287,7 @@ class Episode:
                                     ),
                                 ),
                             )
-                            for c in self.completion.descendants(model=model)
+                            for c in self.completion.descendants(models=models)
                         )
                         if max_splits > 0
                     )

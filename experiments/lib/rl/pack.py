@@ -96,7 +96,9 @@ def packed_tensors(
             tokenizer,
             trajectories_per_episode,
         )
-    max_ancestors = max(episode.completion.max_depth(model) for episode in episodes) + 1
+    max_ancestors = (
+        max(episode.completion.max_depth({model}) for episode in episodes) + 1
+    )
     with Timer("Prepared tensors"):
         completion_tensors = {
             completion: get_completion_tensors(
@@ -168,14 +170,14 @@ def packed_sequences(
     completions: Counter[Completion] = Counter()
     for episode in episodes:
         termini: list[Completion] = []
-        possible_termini = episode.completion.leaves(model=model)
+        possible_termini = episode.completion.leaves(models={model})
         if trajectories_per_episode is not None:
             possible_termini = list(possible_termini)
             possible_termini = random.choices(
                 possible_termini,
                 weights=[
                     leaf.sample_weight(
-                        cache=True, model=model, power=sample_probability_power
+                        cache=True, models={model}, power=sample_probability_power
                     )
                     for leaf in possible_termini
                 ],
@@ -184,7 +186,7 @@ def packed_sequences(
         for terminus in possible_termini:
             for terminus in terminus.ancestors(including_self=True):
                 if (
-                    terminus.advantage(cache=True, model=model) != 0
+                    terminus.advantage(cache=True, models={model}) != 0
                     and terminus.token_count(tokenizer, cache=True) <= sequence_length
                 ):
                     break
@@ -222,12 +224,12 @@ def packed_sequences(
                     total_occurances[completion]
                     if trajectories_per_episode is not None
                     else completion.sample_weight(
-                        cache=True, model=model, power=sample_probability_power
+                        cache=True, models={model}, power=sample_probability_power
                     )
                 )
                 / sequence_occurences[completion]
             )
-            if completion.advantage(cache=True, model=model) != 0
+            if completion.advantage(cache=True, models={model}) != 0
             else 0
         )
         for completion in total_occurances
@@ -249,13 +251,13 @@ def get_completion_tensors(
 ) -> dict[str, torch.Tensor]:
     tokens, mask = completion.tokens_and_mask(tokenizer, cache=True)
     values = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
-    value = completion.value(cache=True, model=model)
+    value = completion.value(cache=True, models={model})
     values[mask] = torch.tensor([value for _ in range(mask.sum())])
     advantages = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
     advantages[mask] = torch.tensor(
         [
             advantage
-            for advantage in completion.token_advantages(cache=True, model=model)
+            for advantage in completion.token_advantages(cache=True, models={model})
         ]
     )
     logprobs = torch.full_like(mask, fill_value=torch.nan, dtype=torch.float32)
