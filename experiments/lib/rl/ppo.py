@@ -674,24 +674,27 @@ class PPOLoss(nn.Module):
             weights
         )  # Shape: (num_tokens,)
 
-        ce_loss = (
+        ce_loss = -(
             (
                 values
                 * torch.log(
                     torch.sigmoid(
                         torch.clamp(
-                            self.tanh_log_policy_beta * (new_logprobs - reference_logprobs),
+                            self.tanh_log_policy_beta
+                            * (new_logprobs - reference_logprobs),
                             min=-20.0,
                             max=20.0,
                         )
-                    ) + 1e-10
+                    )
+                    + 1e-10
                 )
                 + (1 - values)
                 * torch.log(
                     1
                     - torch.sigmoid(
                         torch.clamp(
-                            self.tanh_log_policy_beta * (new_logprobs - reference_logprobs),
+                            self.tanh_log_policy_beta
+                            * (new_logprobs - reference_logprobs),
                             min=-20.0,
                             max=20.0,
                         )
