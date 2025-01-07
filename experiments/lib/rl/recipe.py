@@ -1101,6 +1101,7 @@ class TuneRecipe(FTRecipeInterface):
                     logprobs=batch["logprobs"],
                     reference_logprobs=reference_logprobs,
                     weights=batch["weights"],
+                    model_ids=batch["model_ids"],
                     bos_id=bos_id,
                 )
                 del logits, batch
@@ -1154,6 +1155,8 @@ class TuneRecipe(FTRecipeInterface):
                     )
                     advantage_to_log = per_token_result.advantage_loss.item()
                     value_to_log = per_token_result.value_loss.item()
+                    convergence_to_log = per_token_result.convergence_loss.item()
+                    divergence_to_log = per_token_result.divergence_loss.item()
                     exploration_to_log = per_token_result.exploration_bonus.item()
                     entropy_to_log = per_token_result.entropy_bonus.item()
                     entropy_target_to_log = per_token_result.entropy_target_loss.item()
@@ -1171,21 +1174,23 @@ class TuneRecipe(FTRecipeInterface):
                         f"{curr_epoch + 1}|{self.global_step}|Loss: {loss_to_log:.4f}"
                     )
                     pbar.set_postfix(
-                        policy=f"{policy_to_log:.4f}",
-                        unclipped_policy=f"{unclipped_policy_to_log:.4f}",
+                        # policy=f"{policy_to_log:.4f}",
+                        # unclipped_policy=f"{unclipped_policy_to_log:.4f}",
                         tanh_log_policy=f"{tanh_log_policy_to_log:.4f}",
-                        reinforce=f"{reinforce_to_log:.4f}",
-                        advantage_prediction=f"{advantage_prediction_to_log:.4f}",
-                        advantage=f"{advantage_to_log:.4f}",
-                        value=f"{value_to_log:.4f}",
-                        exploration=f"{exploration_to_log:.4f}",
+                        # reinforce=f"{reinforce_to_log:.4f}",
+                        # advantage_prediction=f"{advantage_prediction_to_log:.4f}",
+                        # advantage=f"{advantage_to_log:.4f}",
+                        # value=f"{value_to_log:.4f}",
+                        conv=f"{convergence_to_log:.4f}",
+                        div=f"{divergence_to_log:.4f}",
+                        # exploration=f"{exploration_to_log:.4f}",
                         entropy=f"{entropy_to_log:.4f}",
                         entropy_target=f"{entropy_target_to_log:.4f}",
                         kl_div=f"{kl_div_to_log:.4f}",
-                        ce=f"{ce_to_log:.4f}",
-                        weighted_entropy=f"{weighted_entropy_to_log:.4f}",
-                        weighted_kl_div=f"{weighted_kl_div_to_log:.4f}",
-                        weighted_ce=f"{weighted_ce_to_log:.4f}",
+                        # ce=f"{ce_to_log:.4f}",
+                        # weighted_entropy=f"{weighted_entropy_to_log:.4f}",
+                        # weighted_kl_div=f"{weighted_kl_div_to_log:.4f}",
+                        # weighted_ce=f"{weighted_ce_to_log:.4f}",
                     )
 
                     # Log per-step metrics
@@ -1202,7 +1207,10 @@ class TuneRecipe(FTRecipeInterface):
                             "tanh_log_policy": tanh_log_policy_to_log,
                             "reinforce": reinforce_to_log,
                             "advantage_prediction": advantage_prediction_to_log,
+                            "advantage": advantage_to_log,
                             "value": value_to_log,
+                            "convergence": convergence_to_log,
+                            "divergence": divergence_to_log,
                             "exploration": exploration_to_log,
                             "entropy": entropy_to_log,
                             "entropy_target": entropy_target_to_log,

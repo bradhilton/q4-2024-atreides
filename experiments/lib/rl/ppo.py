@@ -116,6 +116,8 @@ class PPOResult:
     advantage_prediction_weight: torch.Tensor = tensor_field()
     advantage_weight: torch.Tensor = tensor_field()
     value_weight: torch.Tensor = tensor_field()
+    convergence_weight: torch.Tensor = tensor_field()
+    divergence_weight: torch.Tensor = tensor_field()
     exploration_weight: torch.Tensor = tensor_field()
     entropy_weight: torch.Tensor = tensor_field()
     entropy_target_weight: torch.Tensor = tensor_field()
@@ -133,6 +135,8 @@ class PPOResult:
     advantage_prediction_loss: torch.Tensor = tensor_field()
     advantage_loss: torch.Tensor = tensor_field()
     value_loss: torch.Tensor = tensor_field()
+    convergence_loss: torch.Tensor = tensor_field()
+    divergence_loss: torch.Tensor = tensor_field()
     exploration_bonus: torch.Tensor = tensor_field()
     entropy_bonus: torch.Tensor = tensor_field()
     entropy_target: torch.Tensor = tensor_field()
@@ -183,6 +187,8 @@ class PPOResult:
             + (self.advantage_prediction_weight / self.num_tokens)
             * self.advantage_prediction_loss
             + (self.value_weight / self.num_tokens) * self.value_loss
+            + (self.convergence_weight / self.num_tokens) * self.convergence_loss
+            - (self.divergence_weight / self.num_tokens) * self.divergence_loss
             - (self.exploration_weight / self.num_tokens) * self.exploration_bonus
             - (self.entropy_weight / self.num_tokens) * self.entropy_bonus
             + (self.entropy_target_weight / self.num_tokens) * self.entropy_target_loss
@@ -225,6 +231,9 @@ class PPOLoss(nn.Module):
         advantage_quantile_weight: float = 1.0,
         value_coef: float = 0.0,
         value_quantile: Optional[float] = None,
+        model_id: int = 0,
+        convergence_coef: float = 0.0,
+        divergence_coef: float = 0.0,
         exploration_coef: float = 0.0,
         entropy_coef: float = 0.01,
         entropy_target: float = 0.5,
@@ -272,6 +281,9 @@ class PPOLoss(nn.Module):
             advantage_quantile_weight (float): Weight for the quantile advantage loss if advantage_quantile is not None. Defaults to 1.0.
             value_coef (float): Coefficient for the value loss (defaults to 0.0).
             value_quantile (Optional[float]): Optional quantile to use for (quantile) value loss. Defaults to None.
+            model_id (int): The ID of the model to use for convergence/divergence losses. Defaults to 0.
+            convergence_coef (float): Coefficient for the convergence loss. Defaults to 0.0.
+            divergence_coef (float): Coefficient for the divergence loss. Defaults to 0.0.
             exploration_coef (float): Coefficient for the exploration bonus to encourage exploration. Defaults to 0.0.
             entropy_coef (float): Coefficient for the entropy bonus to encourage exploration.
             entropy_target (float): Target entropy (defaults to 0.5).
@@ -313,6 +325,9 @@ class PPOLoss(nn.Module):
         self.advantage_quantile_weight = advantage_quantile_weight
         self.value_coef = value_coef
         self.value_quantile = value_quantile
+        self.model_id = model_id
+        self.convergence_coef = convergence_coef
+        self.divergence_coef = divergence_coef
         self.exploration_coef = exploration_coef
         self.entropy_coef = entropy_coef
         self.entropy_target = entropy_target
@@ -340,6 +355,7 @@ class PPOLoss(nn.Module):
         logprobs: torch.Tensor,
         reference_logprobs: torch.Tensor,
         weights: torch.Tensor,
+        model_ids: torch.Tensor,
         bos_id: int,
     ) -> PPOResult:
         """
@@ -379,6 +395,10 @@ class PPOLoss(nn.Module):
                 Shape: (batch_size, sequence_length)
                 Weights for each token in the sequence.
 
+            model_ids (Tensor):
+                Shape: (batch_size, sequence_length)
+                The ID of the model for each token in the sequence.
+
             bos_id (int):
                 Index of the beginning of sequence token in the vocabulary.
 
@@ -397,6 +417,7 @@ class PPOLoss(nn.Module):
                 logprobs.chunk(num_chunks, dim=1),
                 reference_logprobs.chunk(num_chunks, dim=1),
                 weights.chunk(num_chunks, dim=1),
+                model_ids.chunk(num_chunks, dim=1),
             ):
                 result += self._forward_chunk(*chunked_args, bos_id=bos_id)
             return result
@@ -410,6 +431,7 @@ class PPOLoss(nn.Module):
             logprobs,
             reference_logprobs,
             weights,
+            model_ids,
             bos_id=bos_id,
         )
 
@@ -423,6 +445,7 @@ class PPOLoss(nn.Module):
         logprobs: torch.Tensor,
         reference_logprobs: torch.Tensor,
         weights: torch.Tensor,
+        model_ids: torch.Tensor,
         bos_id: int,
     ) -> PPOResult:
         """
@@ -444,7 +467,7 @@ class PPOLoss(nn.Module):
         logprobs = shift_tensor(logprobs).view(-1)
         reference_logprobs = shift_tensor(reference_logprobs).view(-1)
         weights = shift_tensor(weights).view(-1)
-
+        model_ids = shift_tensor(model_ids).view(-1)
         # Create a Categorical distribution from logits
         dist = torch.distributions.Categorical(logits=logits)
 
@@ -643,6 +666,14 @@ class PPOLoss(nn.Module):
         else:
             value_loss = torch.tensor(0.0, device=logits.device)
 
+        # Convergence/Divergence Losses
+        convergence_loss = (
+            -new_logprobs.mul(model_ids == self.model_id).mul(weights).sum()
+        )
+        divergence_loss = (
+            new_logprobs.mul(model_ids != self.model_id).mul(weights).sum()
+        )
+
         # Exploration bonus
         exploration_bonus = -new_logprobs.mul(weights).sum()
 
@@ -722,6 +753,8 @@ class PPOLoss(nn.Module):
             advantage_prediction_weight=self.advantage_prediction_coef * num_tokens,
             advantage_weight=self.advantage_coef * num_tokens,
             value_weight=self.value_coef * num_tokens,
+            convergence_weight=self.convergence_coef * num_tokens,
+            divergence_weight=self.divergence_coef * num_tokens,
             exploration_weight=self.exploration_coef * num_tokens,
             entropy_weight=self.entropy_coef * num_tokens,
             entropy_target_weight=self.entropy_target_coef * num_tokens,
@@ -739,6 +772,8 @@ class PPOLoss(nn.Module):
             advantage_prediction_loss=advantage_prediction_loss,
             advantage_loss=advantage_loss,
             value_loss=value_loss,
+            convergence_loss=convergence_loss,
+            divergence_loss=divergence_loss,
             exploration_bonus=exploration_bonus,
             entropy_bonus=entropy_bonus,
             entropy_target=self.entropy_target * num_tokens,

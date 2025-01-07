@@ -21,6 +21,7 @@ class PackedTensors(TypedDict):
     mask: torch.Tensor
     input_pos: torch.Tensor
     ids: torch.Tensor
+    model_ids: torch.Tensor
 
 
 class DiskPackedTensors(TypedDict):
@@ -63,6 +64,7 @@ def packed_tensors_from_dir(**kwargs: Unpack[DiskPackedTensors]) -> PackedTensor
             "mask": torch.bool,
             "input_pos": torch.long,
             "ids": torch.long,
+            "model_ids": torch.long,
         }.items()
     }  # type: ignore
 
@@ -155,6 +157,7 @@ def packed_tensors(
         "mask": mask,
         "input_pos": tensors["input_pos"],
         "ids": tensors["ids"],
+        "model_ids": tensors["model_ids"],
     }
 
 

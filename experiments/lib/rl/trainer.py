@@ -68,7 +68,7 @@ class EvalResult:
     entropy: float
     tokens: int
     exceptions: list[BaseException]
-    
+
     @property
     def wandb_data(self) -> dict[str, Any]:
         return {
@@ -202,7 +202,7 @@ class Trainer:
         tune_episode_sample_fraction: float = 1.0,
         tune_model: Callable[[], TransformerDecoder],
         tune_model_type: str,
-        tune_recipe_config: Optional[TuneRecipeConfig] = None,
+        tune_recipe_configs: list[TuneRecipeConfig] = [],
         tune_run: bool = True,
         tune_run_env: Optional[dict[str, str]] = None,
         tune_sequence_length: int = 8192,
@@ -240,7 +240,7 @@ class Trainer:
         self.tune_episode_sample_fraction = tune_episode_sample_fraction
         self.tune_model = tune_model
         self.tune_model_type = tune_model_type
-        self.tune_recipe_config = tune_recipe_config or TuneRecipeConfig()
+        self.tune_recipe_configs = tune_recipe_configs or [TuneRecipeConfig()]
         self.tune_run = tune_run
         self.tune_run_env = tune_run_env or {}
         self.tune_sequence_length = tune_sequence_length
@@ -324,7 +324,9 @@ class Trainer:
             max=sum(result.max for result in results) / len(results),
             entropy=sum(result.entropy for result in results) / len(results),
             tokens=round(sum(result.tokens for result in results) / len(results)),
-            exceptions=[exception for result in results for exception in result.exceptions],
+            exceptions=[
+                exception for result in results for exception in result.exceptions
+            ],
         )
         results.append(combined_result)
         for result in results:
@@ -603,20 +605,31 @@ class Trainer:
         await self.stop_vllms()
         model_names = await asyncio.gather(
             *[
-                self._tune_model(result, model, device, verbosity)
-                for device, model in enumerate(self.latest_models)
+                self._tune_model(
+                    result,
+                    model,
+                    id,
+                    self.tune_recipe_configs[id % len(self.tune_recipe_configs)],
+                    verbosity,
+                )
+                for id, model in enumerate(self.latest_models)
             ]
         )
         self.models.extend(model_names)
 
     async def _tune_model(
-        self, result: ExploreResult, model: str, device: int, verbosity: Verbosity
+        self,
+        result: ExploreResult,
+        model: str,
+        id: int,
+        config: TuneRecipeConfig,
+        verbosity: Verbosity,
     ) -> str:
         checkpoint_dir = await self._get_checkpoint_dir(model)
         base_checkpoint_dir = await self._get_checkpoint_dir(self.base_model)
-        output_subdir = f"/cuda:{device}"
+        output_subdir = f"/cuda:{id}"
         os.makedirs(self.output_dir + output_subdir, exist_ok=True)
-        self.tune_recipe_config.checkpointer = self._get_checkpointer_config(
+        config.checkpointer = self._get_checkpointer_config(
             checkpoint_dir,
             checkpoint_files=(
                 self.base_model_checkpoint_files if model != self.base_model else None
@@ -624,40 +637,43 @@ class Trainer:
             mlp_head_checkpointer=True,
             output_subdir=output_subdir,
         )
-        if not self.tune_recipe_config.metric_logger:
-            self.tune_recipe_config.metric_logger = (
+        config.reference_checkpointer = self._get_checkpointer_config(
+            base_checkpoint_dir,
+            checkpoint_files=self.base_model_checkpoint_files,
+        )
+        if not config.metric_logger:
+            config.metric_logger = (
                 ComponentConfig(WandBLogger, **self._wandb_kwargs)
                 if self._wandb_kwargs
                 else ComponentConfig(DiskLogger, log_dir=self.output_dir + "/logs")
             )
-        self.tune_recipe_config.model = ComponentConfig(self.tune_model)
-        self.tune_recipe_config.dataset = ComponentConfig(
+        config.model = ComponentConfig(self.tune_model)
+        config.dataset = ComponentConfig(
             PackedDataset, **result.disk_packed_tensors(drop_last=True)
         )
-        self.tune_recipe_config.reference_checkpointer = self._get_checkpointer_config(
-            base_checkpoint_dir,
-            checkpoint_files=self.base_model_checkpoint_files,
-        )
-        self.tune_recipe_config.seed = random.randint(0, 2**32 - 1)
+        config.loss.model_id = min(id, len(set(self.latest_models)) - 1)
+        config.seed = random.randint(0, 2**32 - 1)
         if self.tune_run:
-            dict_config = self.tune_recipe_config.dict_config()
+            dict_config = config.dict_config()
             config_path = f"{self.output_dir}{output_subdir}/config.yaml"
             OmegaConf.save(dict_config, config_path)
             await self._tune_run(
                 config_path=config_path,
-                device=device,
+                id=id,
                 total=min(
                     len(result.sequences),
-                    self.tune_recipe_config.max_steps_per_epoch or 1024,
+                    config.max_steps_per_epoch or 1024,
                 ),
                 verbosity=verbosity,
             )
         else:
             cleanup_before_training()
-            recipe_main(self.tune_recipe_config)
+            recipe_main(config)
         return self._save(checkpoint_dir, output_subdir)
 
-    async def _tune_run(self, config_path: str, device: int, total: int, verbosity: Verbosity) -> None:
+    async def _tune_run(
+        self, config_path: str, id: int, total: int, verbosity: Verbosity
+    ) -> None:
         args = [
             "tune",
             "run",
@@ -678,13 +694,13 @@ class Trainer:
             env={
                 **os.environ,
                 **self.tune_run_env,
-                "CUDA_VISIBLE_DEVICES": str(device),
+                "CUDA_VISIBLE_DEVICES": str(id),
             },
         )
         if verbosity == 1:
             pbar = self.tqdm(
                 total=total,
-                position=device,
+                position=id,
             )
         else:
             pbar = None

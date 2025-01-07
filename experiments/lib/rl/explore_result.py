@@ -194,6 +194,7 @@ class ExploreResult:
             "reference_logprobs": torch.nan,
             "ids": 0,
             "input_pos": 0,
+            "model_ids": 0,
         }.items():
             packed_tensors[key][len(self.sequences)] = self._sequence_to_tensor(
                 sequence=self.sequence,
@@ -283,6 +284,12 @@ class ExploreResult:
             if completion.parent
             else 0
         )
+        model_ids = torch.tensor(
+            [
+                list(self.models).index(completion.model or "")
+                for _ in range(tokens.shape[0])
+            ]
+        )
         return {
             "tokens": tokens,
             "values": values,
@@ -293,6 +300,7 @@ class ExploreResult:
             "input_pos": torch.tensor(
                 [i for i in range(start_pos_id, tokens.shape[0] + start_pos_id)]
             ),
+            "model_ids": model_ids,
         }
 
     def _write_weights(self, packed_tensors: PackedTensors) -> None:
