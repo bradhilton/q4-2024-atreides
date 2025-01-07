@@ -636,16 +636,17 @@ class Trainer:
     async def tune(self, result: ExploreResult, *, verbosity: Verbosity = 2) -> None:
         print(f"Tuning model on {len(result.sequences)} sequences")
         await self.stop_vllms()
-        await asyncio.gather(
+        model_names = await asyncio.gather(
             *[
                 self._tune_model(result, model, device, verbosity)
                 for device, model in enumerate(self.latest_models)
             ]
         )
+        self.models.extend(model_names)
 
     async def _tune_model(
         self, result: ExploreResult, model: str, device: int, verbosity: Verbosity
-    ) -> None:
+    ) -> str:
         checkpoint_dir = await self._get_checkpoint_dir(model)
         output_subdir = f"/cuda:{device}"
         os.makedirs(self.output_dir + output_subdir, exist_ok=True)
@@ -672,13 +673,20 @@ class Trainer:
             checkpoint_files=self.base_model_checkpoint_files,
         )
         if self.tune_run:
-            await self._tune_run(device, verbosity)
+            await self._tune_run(
+                device,
+                min(
+                    len(result.sequences),
+                    self.tune_recipe_config.max_steps_per_epoch or 1024,
+                ),
+                verbosity,
+            )
         else:
             cleanup_before_training()
             recipe_main(self.tune_recipe_config)
-        self._save(checkpoint_dir, output_subdir)
+        return self._save(checkpoint_dir, output_subdir)
 
-    async def _tune_run(self, device: int, verbosity: Verbosity) -> None:
+    async def _tune_run(self, device: int, total: int, verbosity: Verbosity) -> None:
         dict_config = self.tune_recipe_config.dict_config()
         config_path = self.output_dir + f"/cuda:{device}/config.yaml"
         OmegaConf.save(dict_config, config_path)
@@ -705,6 +713,15 @@ class Trainer:
                 "CUDA_VISIBLE_DEVICES": str(device),
             },
         )
+        if verbosity == 1:
+            pbar = self.tqdm(
+                desc=f"cuda:{device}",
+                total=total,
+                dynamic_ncols=True,
+                position=device,
+            )
+        else:
+            pbar = None
 
         async def log_output(stream: asyncio.StreamReader, io: IO[str]) -> None:
             output = ""
@@ -720,13 +737,27 @@ class Trainer:
                         output = ""
                     elif verbosity == 1:
                         output = output.split("\n")[-1]
-                        pbar_regex = re.compile(
-                            r"\[(?:\d+:)?\d+:\d+<(?:\d+:)?\d+:\d+.*\]"
-                        )
-                        if pbar_regex.search(output):
-                            io.write(output)
-                            io.flush()
-                            output = ""
+                        if pbar:
+                            pbar_start = re.compile(r"(\d+)\|(\d+)\|Loss: ([\d.]+):")
+                            if match := pbar_start.match(output):
+                                epoch, step, loss = match.groups()
+                                pbar.update(int(step) - pbar.n)
+                                pbar.set_description(f"{epoch}|{step}|Loss: {loss}")
+                            metrics = {
+                                key: value
+                                for key, value in re.findall(r"(\w+)=([\d.-]+)", output)
+                            }
+                            if metrics:
+                                pbar.set_postfix(**metrics)
+                                output = ""
+                        else:
+                            pbar_regex = re.compile(
+                                r"\[(?:\d+:)?\d+:\d+<(?:\d+:)?\d+:\d+.*\]"
+                            )
+                            if pbar_regex.search(output):
+                                io.write(output)
+                                io.flush()
+                                output = ""
                 except Exception:
                     break
 
@@ -770,7 +801,10 @@ class Trainer:
             model_type=self.tune_model_type,
         )
 
-    def _save(self, base_checkpoint_dir: str, output_subdir: str) -> None:
+    def _save(self, base_checkpoint_dir: str, output_subdir: str) -> str:
+        """
+        Saves and returns the model name of the latest checkpoint.
+        """
         # Find the latest epoch number from model checkpoint files
         epoch = max(
             (
@@ -836,7 +870,7 @@ class Trainer:
             shutil.rmtree(output_subdir_path)
 
         print(f"Saved iteration {iteration} model files to {model_name}")
-        self.models.append(model_name)
+        return model_name
 
     async def get_completion_sampler_pool(
         self, *, verbosity: Verbosity = 2
