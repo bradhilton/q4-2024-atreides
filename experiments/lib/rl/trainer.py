@@ -270,7 +270,7 @@ class Trainer:
                     for pbar_position, eval_name in enumerate(self.evals)
                 ),
                 self.explore(
-                    pbar_position=len(self.evals),
+                    pbar_position=len(self.evals) * torch.cuda.device_count(),
                     return_exceptions=True,
                     verbosity=verbosity,
                 ),
@@ -715,9 +715,7 @@ class Trainer:
         )
         if verbosity == 1:
             pbar = self.tqdm(
-                desc=f"cuda:{device}",
                 total=total,
-                dynamic_ncols=True,
                 position=device,
             )
         else:
@@ -739,7 +737,7 @@ class Trainer:
                         output = output.split("\n")[-1]
                         if pbar:
                             pbar_start = re.compile(r"(\d+)\|(\d+)\|Loss: ([\d.]+):")
-                            if match := pbar_start.match(output):
+                            if match := pbar_start.search(output):
                                 epoch, step, loss = match.groups()
                                 pbar.update(int(step) - pbar.n)
                                 pbar.set_description(f"{epoch}|{step}|Loss: {loss}")
