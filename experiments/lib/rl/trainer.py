@@ -1,13 +1,11 @@
-from aioitertools.builtins import iter, enumerate as aenumerate, next as anext
+from aioitertools.builtins import iter
 from aioitertools import itertools as ait
 from aioitertools.helpers import maybe_await
-from aioitertools.types import AnyIterable
 import asyncio
 from dataclasses import dataclass
 import glob
-import itertools as it
 from omegaconf import OmegaConf
-from openai import AsyncOpenAI
+import nest_asyncio
 import os
 import random
 import re
@@ -27,7 +25,6 @@ from typing import (
     Iterable,
     Literal,
     Optional,
-    overload,
     Protocol,
     Union,
 )
@@ -44,7 +41,7 @@ from ..tokenizer import Tokenizer
 from ..utils import get_semaphore
 from ..vllm import start_vllms, vLLM
 
-
+nest_asyncio.apply()
 Episodes = Union[
     Iterable[Union[Episode, BaseException]],
     AsyncIterable[Union[Episode, BaseException]],
@@ -212,7 +209,7 @@ class Trainer:
         self.base_model = base_model
         self.output_dir = os.path.abspath(output_dir)
         os.makedirs(self.output_dir, exist_ok=True)
-        self.models = [base_model] * torch.cuda.device_count() + sorted(
+        self.models = sorted(
             [
                 os.path.join(self.output_dir, subdir)
                 for subdir in os.listdir(self.output_dir)
@@ -220,8 +217,13 @@ class Trainer:
                 and subdir.isdigit()
             ]
         )
-        if self.latest_models != {base_model}:
-            print(f"Resuming from {self.latest_models}")
+        if not self.models:
+            checkpoint_dir = asyncio.run(self._get_checkpoint_dir(self.base_model))
+            self.models = [
+                self._create_iteration_dir(checkpoint_dir)[1]
+                for _ in range(torch.cuda.device_count())
+            ]
+        print(f"Resuming from {self.latest_models}")
         self.base_model_checkpoint_files = base_model_checkpoint_files
         self.explore_options = explore_options
         self.explore_impl = explore_impl
@@ -790,7 +792,7 @@ class Trainer:
 
     def _save(self, base_checkpoint_dir: str, output_subdir: str) -> str:
         """
-        Saves and returns the model name of the latest checkpoint.
+        Saves and returns the directory of the latest checkpoint.
         """
         # Find the latest epoch number from model checkpoint files
         epoch = max(
@@ -811,34 +813,7 @@ class Trainer:
             epoch is not None
         ), f"No model checkpoint files found to save in output directory {self.output_dir}{output_subdir}"
 
-        # Find the next iteration number by looking at existing subdirectories
-        iteration = (
-            max(
-                (
-                    int(subdir)
-                    for subdir in os.listdir(self.output_dir)
-                    if os.path.isdir(os.path.join(self.output_dir, subdir))
-                    and subdir.isdigit()
-                ),
-                default=0,
-            )
-            + 1
-        )
-        model_name = f"{self.output_dir}/{iteration:04d}"
-
-        # Create a new directory for this iteration
-        iteration_dir = f"{self.output_dir}/{iteration:04d}"
-        os.makedirs(iteration_dir, exist_ok=True)
-
-        # Copy configuration files (non-model files) to the iteration directory
-        for file in os.listdir(base_checkpoint_dir):
-            if not any(
-                file.endswith(suffix)
-                for suffix in (".safetensors", ".pt", ".ckpt", ".bin", ".pth", ".h5")
-            ):
-                src = os.path.join(base_checkpoint_dir, file)
-                dst = os.path.join(iteration_dir, file)
-                shutil.copy2(src, dst)
+        iteration, iteration_dir = self._create_iteration_dir(base_checkpoint_dir)
 
         # Move model checkpoint files to the iteration directory
         for src in [
@@ -856,8 +831,39 @@ class Trainer:
         if os.path.exists(output_subdir_path):
             shutil.rmtree(output_subdir_path)
 
-        print(f"Saved iteration {iteration} model files to {model_name}")
-        return model_name
+        print(f"Saved iteration {iteration} model files to {iteration_dir}")
+        return iteration_dir
+
+    def _create_iteration_dir(self, base_checkpoint_dir: str) -> tuple[int, str]:
+        # Find the next iteration number by looking at existing subdirectories
+        iteration = (
+            max(
+                (
+                    int(subdir)
+                    for subdir in os.listdir(self.output_dir)
+                    if os.path.isdir(os.path.join(self.output_dir, subdir))
+                    and subdir.isdigit()
+                ),
+                default=0,
+            )
+            + 1
+        )
+
+        # Create a new directory for this iteration
+        iteration_dir = f"{self.output_dir}/{iteration:04d}"
+        os.makedirs(iteration_dir, exist_ok=True)
+
+        # Copy configuration files (non-model files) to the iteration directory
+        for file in os.listdir(base_checkpoint_dir):
+            if not any(
+                file.endswith(suffix)
+                for suffix in (".safetensors", ".pt", ".ckpt", ".bin", ".pth", ".h5")
+            ):
+                src = os.path.join(base_checkpoint_dir, file)
+                dst = os.path.join(iteration_dir, file)
+                shutil.copy2(src, dst)
+
+        return iteration, iteration_dir
 
     async def get_completion_sampler_pool(
         self, *, verbosity: Verbosity = 2
