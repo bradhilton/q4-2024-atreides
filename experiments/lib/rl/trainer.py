@@ -9,6 +9,7 @@ import itertools as it
 from omegaconf import OmegaConf
 from openai import AsyncOpenAI
 import os
+import random
 import re
 import shutil
 import sys
@@ -57,6 +58,25 @@ class Eval:
     patience: float = 60.0
     samples_per_episode: int = 1
     sampling_kwargs: Optional[SamplingKwargs] = None
+
+
+@dataclass
+class EvalResult:
+    name: str
+    avg: float
+    max: float
+    entropy: float
+    tokens: int
+    exceptions: list[BaseException]
+    
+    @property
+    def wandb_data(self) -> dict[str, Any]:
+        return {
+            f"{self.name}/avg": self.avg,
+            f"{self.name}/max": self.max,
+            f"{self.name}/entropy": self.entropy,
+            f"{self.name}/tokens": self.tokens,
+        }
 
 
 class ExploreImpl(Protocol):
@@ -212,21 +232,11 @@ class Trainer:
             32768 // tune_sequence_length, 1
         )
         self.evals = {eval.name: eval for eval in evals or []}
-        self.eval_results: dict[str, dict[str, dict[str, Any]]] = {
-            eval.name: {} for eval in self.evals.values()
-        }
+        self.eval_results: dict[str, list[EvalResult]] = {}
         self.eval_episodes = {eval.name: eval.episodes for eval in self.evals.values()}
         self.eval_exceptions = {eval.name: [] for eval in self.evals.values()}
         self.explore_results: list[ExploreResult] = []
         self.torchrun_kwargs = torchrun_kwargs or {}
-        # or (
-        #     {
-        #         "nnodes": 1,
-        #         "nproc_per_node": torch.cuda.device_count(),
-        #     }
-        #     if torch.cuda.device_count() > 1
-        #     else {}
-        # )
         self.tune_episode_sample_fraction = tune_episode_sample_fraction
         self.tune_model = tune_model
         self.tune_model_type = tune_model_type
@@ -254,8 +264,8 @@ class Trainer:
         )
 
     @property
-    def latest_models(self) -> set[str]:
-        return set(self.models[-torch.cuda.device_count() :])
+    def latest_models(self) -> list[str]:
+        return self.models[-torch.cuda.device_count() :]
 
     async def train(self, iterations: int, verbosity: Verbosity = 2) -> None:
         for _ in range(iterations):
@@ -264,7 +274,6 @@ class Trainer:
                     self.eval(
                         eval_name,
                         pbar_position,
-                        return_exceptions=True,
                         verbosity=verbosity,
                     )
                     for pbar_position, eval_name in enumerate(self.evals)
@@ -283,45 +292,19 @@ class Trainer:
                 self.eval(
                     eval_name,
                     pbar_position,
-                    return_exceptions=True,
                     verbosity=verbosity,
                 )
                 for pbar_position, eval_name in enumerate(self.evals)
             )
         )
 
-    @overload
     async def eval(
         self,
         eval_name: str,
         pbar_position: Optional[int] = None,
         *,
-        return_exceptions: Literal[False] = False,
         verbosity: Verbosity = 2,
-    ) -> Optional[float]: ...
-
-    @overload
-    async def eval(
-        self,
-        eval_name: str,
-        pbar_position: Optional[int] = None,
-        *,
-        return_exceptions: Literal[True] = True,
-        verbosity: Verbosity = 2,
-    ) -> tuple[Optional[float], list[BaseException]]: ...
-
-    async def eval(
-        self,
-        eval_name: str,
-        pbar_position: Optional[int] = None,
-        *,
-        return_exceptions: bool = True,
-        verbosity: Verbosity = 2,
-    ) -> Union[Optional[float], tuple[Optional[float], list[BaseException]]]:
-        if self.eval_episodes[eval_name] is None:
-            if return_exceptions:
-                return None, []
-            return None
+    ) -> EvalResult:
         pool = await self.get_completion_sampler_pool(verbosity=verbosity)
         results = await asyncio.gather(
             *(
@@ -330,27 +313,31 @@ class Trainer:
                     (pbar_position or 0) * len(pool.samplers) + id,
                     id,
                     completion_sampler,
-                    return_exceptions,
                     verbosity,
                 )
                 for id, completion_sampler in enumerate(pool.samplers)
             )
         )
-        if return_exceptions:
-            scores = [
-                result[0]
-                for result in results
-                if isinstance(result, tuple) and isinstance(result[0], float)
-            ]
-            return sum(scores) / max(len(scores), 1), [
-                exception
-                for result in (
-                    result for result in results if isinstance(result, tuple)
-                )
-                for exception in result[1]
-            ]
-        scores = [result for result in results if isinstance(result, float)]
-        return sum(scores) / max(len(scores), 1)
+        combined_result = EvalResult(
+            name=eval_name,
+            avg=sum(result.avg for result in results) / len(results),
+            max=sum(result.max for result in results) / len(results),
+            entropy=sum(result.entropy for result in results) / len(results),
+            tokens=round(sum(result.tokens for result in results) / len(results)),
+            exceptions=[exception for result in results for exception in result.exceptions],
+        )
+        results.append(combined_result)
+        for result in results:
+            self.eval_results.setdefault(result.name, []).append(result)
+        if self._wandb_run:
+            wandb.log(
+                {
+                    key: value
+                    for result in results
+                    for key, value in result.wandb_data.items()
+                }
+            )
+        return combined_result
 
     async def _eval(
         self,
@@ -358,9 +345,8 @@ class Trainer:
         pbar_position: int,
         id: int,
         completion_sampler: CompletionSampler,
-        return_exceptions: bool,
         verbosity: Verbosity,
-    ) -> Union[Optional[float], tuple[Optional[float], list[BaseException]]]:
+    ) -> EvalResult:
         pbar = self.tqdm(
             desc=f"{eval_name}/{id}",
             total=getattr(self.eval_episodes[eval_name], "__len__", lambda: None)(),
@@ -463,11 +449,8 @@ class Trainer:
             self.eval_episodes[eval_name] or (),
         ):
             if isinstance(episode, BaseException):
-                if return_exceptions:
-                    exceptions.append(episode)
-                    continue
-                else:
-                    raise episode
+                exceptions.append(episode)
+                continue
             episodes.append(episode)
             samples = self.evals[eval_name].samples_per_episode
             task = asyncio.create_task(
@@ -501,35 +484,17 @@ class Trainer:
                     task.cancel()
                 break
             except BaseException as exception:
-                if return_exceptions:
-                    exceptions.append(exception)
-                else:
-                    raise exception
+                exceptions.append(exception)
         pbar.close()
         avg_score = get_avg_score()
-        if model not in self.eval_results[eval_name]:
-            max_score = get_max_score()
-            entropy = get_entropy()
-            avg_tokens = get_avg_tokens()
-            self.eval_results[eval_name][model] = {
-                "avg": avg_score,
-                "max": max_score,
-                "entropy": entropy,
-                "tokens": avg_tokens,
-            }
-            if self._wandb_run:
-                wandb.log(
-                    {
-                        f"{eval_name}/{id}/avg": avg_score,
-                        f"{eval_name}/{id}/max": max_score,
-                        f"{eval_name}/{id}/entropy": entropy,
-                        f"{eval_name}/{id}/tokens": avg_tokens,
-                    }
-                )
-        self.eval_exceptions[eval_name].extend(exceptions)
-        if return_exceptions:
-            return avg_score, exceptions
-        return avg_score
+        return EvalResult(
+            name=f"{eval_name}/{id}",
+            avg=avg_score,
+            max=get_max_score(),
+            entropy=get_entropy(),
+            tokens=get_avg_tokens(),
+            exceptions=exceptions,
+        )
 
     async def explore(
         self,
@@ -552,7 +517,7 @@ class Trainer:
         result = ExploreResult(
             pbar=pbar,
             max_mask_sequence_batch_size=self.max_mask_sequence_batch_size,
-            models=self.latest_models,
+            models=set(self.latest_models),
             abs_weighted_sum=200_000.0,
             advantage_max_weight=self.explore_options.advantage_max_weight,
             sample_probability_power=self.explore_options.get_sample_probability_power(),
@@ -648,6 +613,7 @@ class Trainer:
         self, result: ExploreResult, model: str, device: int, verbosity: Verbosity
     ) -> str:
         checkpoint_dir = await self._get_checkpoint_dir(model)
+        base_checkpoint_dir = await self._get_checkpoint_dir(self.base_model)
         output_subdir = f"/cuda:{device}"
         os.makedirs(self.output_dir + output_subdir, exist_ok=True)
         self.tune_recipe_config.checkpointer = self._get_checkpointer_config(
@@ -669,27 +635,29 @@ class Trainer:
             PackedDataset, **result.disk_packed_tensors(drop_last=True)
         )
         self.tune_recipe_config.reference_checkpointer = self._get_checkpointer_config(
-            await self._get_checkpoint_dir(self.base_model),
+            base_checkpoint_dir,
             checkpoint_files=self.base_model_checkpoint_files,
         )
+        self.tune_recipe_config.seed = random.randint(0, 2**32 - 1)
         if self.tune_run:
+            dict_config = self.tune_recipe_config.dict_config()
+            config_path = f"{self.output_dir}{output_subdir}/config.yaml"
+            OmegaConf.save(dict_config, config_path)
             await self._tune_run(
-                device,
-                min(
+                config_path=config_path,
+                device=device,
+                total=min(
                     len(result.sequences),
                     self.tune_recipe_config.max_steps_per_epoch or 1024,
                 ),
-                verbosity,
+                verbosity=verbosity,
             )
         else:
             cleanup_before_training()
             recipe_main(self.tune_recipe_config)
         return self._save(checkpoint_dir, output_subdir)
 
-    async def _tune_run(self, device: int, total: int, verbosity: Verbosity) -> None:
-        dict_config = self.tune_recipe_config.dict_config()
-        config_path = self.output_dir + f"/cuda:{device}/config.yaml"
-        OmegaConf.save(dict_config, config_path)
+    async def _tune_run(self, config_path: str, device: int, total: int, verbosity: Verbosity) -> None:
         args = [
             "tune",
             "run",
@@ -820,7 +788,7 @@ class Trainer:
 
         assert (
             epoch is not None
-        ), f"No model checkpoint files found to save in output directory {self.output_dir}"
+        ), f"No model checkpoint files found to save in output directory {self.output_dir}{output_subdir}"
 
         # Find the next iteration number by looking at existing subdirectories
         iteration = (
@@ -878,7 +846,7 @@ class Trainer:
         if self._completion_sampler_pool:
             return self._completion_sampler_pool
         vllms = await self.get_or_start_vllms(
-            models=list(self.latest_models),
+            models=self.latest_models,
             config=self.vllm_config,
             verbosity=verbosity,
         )

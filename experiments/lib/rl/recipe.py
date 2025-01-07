@@ -854,7 +854,7 @@ class TuneRecipe(FTRecipeInterface):
         ds = instantiate_component(cfg_dataset)
 
         sampler = DistributedSampler(
-            ds, num_replicas=world_size, rank=rank, shuffle=shuffle, seed=0
+            ds, num_replicas=world_size, rank=rank, shuffle=shuffle, seed=self.seed or 0
         )
         dataloader = TypedDataLoader(
             dataset=ds,
