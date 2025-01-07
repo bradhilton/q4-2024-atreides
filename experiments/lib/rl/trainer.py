@@ -220,7 +220,7 @@ class Trainer:
         if not self.models:
             checkpoint_dir = asyncio.run(self._get_checkpoint_dir(self.base_model))
             self.models = [
-                self._create_iteration_dir(checkpoint_dir)[1]
+                self._create_iteration_dir(checkpoint_dir, copy_model_files=True)[1]
                 for _ in range(torch.cuda.device_count())
             ]
         print(f"Resuming from {self.latest_models}")
@@ -834,7 +834,9 @@ class Trainer:
         print(f"Saved iteration {iteration} model files to {iteration_dir}")
         return iteration_dir
 
-    def _create_iteration_dir(self, base_checkpoint_dir: str) -> tuple[int, str]:
+    def _create_iteration_dir(
+        self, base_checkpoint_dir: str, copy_model_files: bool = False
+    ) -> tuple[int, str]:
         # Find the next iteration number by looking at existing subdirectories
         iteration = (
             max(
@@ -857,7 +859,11 @@ class Trainer:
         for file in os.listdir(base_checkpoint_dir):
             if not any(
                 file.endswith(suffix)
-                for suffix in (".safetensors", ".pt", ".ckpt", ".bin", ".pth", ".h5")
+                for suffix in (
+                    ()
+                    if copy_model_files
+                    else (".safetensors", ".pt", ".ckpt", ".bin", ".pth", ".h5")
+                )
             ):
                 src = os.path.join(base_checkpoint_dir, file)
                 dst = os.path.join(iteration_dir, file)
