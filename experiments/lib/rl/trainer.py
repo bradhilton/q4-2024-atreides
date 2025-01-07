@@ -749,6 +749,8 @@ class Trainer:
         if process.stderr:
             tasks.append(asyncio.create_task(log_output(process.stderr, sys.stderr)))
         _ = await asyncio.gather(*tasks)
+        if pbar:
+            pbar.close()
 
     async def _get_checkpoint_dir(self, model: str) -> str:
         if os.path.exists(os.path.abspath(model)):

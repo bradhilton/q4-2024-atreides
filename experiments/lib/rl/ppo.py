@@ -531,6 +531,7 @@ class PPOLoss(nn.Module):
         entropy = entropy[mask]
         reference_logprobs = reference_logprobs[mask]
         weights = weights[mask]
+        model_ids = model_ids[mask]
 
         if self.normalize_advantages:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)

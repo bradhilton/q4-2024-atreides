@@ -286,7 +286,7 @@ class ExploreResult:
         )
         model_ids = torch.tensor(
             [
-                list(self.models).index(completion.model or "")
+                list(self.models).index(completion.model or list(self.models)[0])
                 for _ in range(tokens.shape[0])
             ]
         )

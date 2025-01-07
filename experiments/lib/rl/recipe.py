@@ -1174,6 +1174,7 @@ class TuneRecipe(FTRecipeInterface):
                         f"{curr_epoch + 1}|{self.global_step}|Loss: {loss_to_log:.4f}"
                     )
                     pbar.set_postfix(
+                        lr=get_lr(self._optimizer or self._optim_ckpt_wrapper),
                         # policy=f"{policy_to_log:.4f}",
                         # unclipped_policy=f"{unclipped_policy_to_log:.4f}",
                         tanh_log_policy=f"{tanh_log_policy_to_log:.4f}",
