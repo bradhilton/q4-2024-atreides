@@ -122,6 +122,8 @@ class PPOResult:
     entropy_weight: torch.Tensor = tensor_field()
     entropy_target_weight: torch.Tensor = tensor_field()
     kl_weight: torch.Tensor = tensor_field()
+    self_kl_weight: torch.Tensor = tensor_field()
+    peer_kl_weight: torch.Tensor = tensor_field()
     reverse_kl_weight: torch.Tensor = tensor_field()
     ce_weight: torch.Tensor = tensor_field()
     weighted_entropy_weight: torch.Tensor = tensor_field()
@@ -141,6 +143,8 @@ class PPOResult:
     entropy_bonus: torch.Tensor = tensor_field()
     entropy_target: torch.Tensor = tensor_field()
     kl_divergence: torch.Tensor = tensor_field()
+    self_kl_divergence: torch.Tensor = tensor_field()
+    peer_kl_divergence: torch.Tensor = tensor_field()
     reverse_kl_divergence: torch.Tensor = tensor_field()
     ce_loss: torch.Tensor = tensor_field()
     weighted_entropy_bonus: torch.Tensor = tensor_field()
@@ -193,6 +197,8 @@ class PPOResult:
             - (self.entropy_weight / self.num_tokens) * self.entropy_bonus
             + (self.entropy_target_weight / self.num_tokens) * self.entropy_target_loss
             + (self.kl_weight / self.num_tokens) * self.kl_divergence
+            + (self.self_kl_weight / self.num_tokens) * self.self_kl_divergence
+            + (self.peer_kl_weight / self.num_tokens) * self.peer_kl_divergence
             + (self.reverse_kl_weight / self.num_tokens) * self.reverse_kl_divergence
             + (self.ce_weight / self.num_tokens) * self.ce_loss
             - (self.weighted_entropy_weight / self.num_tokens)
@@ -239,6 +245,8 @@ class PPOLoss(nn.Module):
         entropy_target: float = 0.5,
         entropy_target_coef: float = 0.0,
         kl_coef: float = 0.0,
+        self_kl_coef: float = 0.0,
+        peer_kl_coef: float = 0.0,
         reverse_kl_coef: float = 0.0,
         ce_coef: float = 0.0,
         weighted_entropy_coef: float = 0.0,
@@ -289,6 +297,8 @@ class PPOLoss(nn.Module):
             entropy_target (float): Target entropy (defaults to 0.5).
             entropy_target_coef (float): Coefficient for the entropy target loss.
             kl_coef (float): Coefficient for KL divergence penalty (defaults to 0.0).
+            self_kl_coef (float): Coefficient for self KL divergence penalty (defaults to 0.0).
+            peer_kl_coef (float): Coefficient for peer KL divergence penalty (defaults to 0.0).
             reverse_kl_coef (float): Coefficient for reverse KL divergence penalty (defaults to 0.0).
             ce_coef (float): Coefficient for cross entropy penalty (defaults to 0.0).
             weighted_entropy_coef (float): Coefficient for the weighted entropy bonus.
@@ -333,6 +343,8 @@ class PPOLoss(nn.Module):
         self.entropy_target = entropy_target
         self.entropy_target_coef = entropy_target_coef
         self.kl_coef = kl_coef
+        self.self_kl_coef = self_kl_coef
+        self.peer_kl_coef = peer_kl_coef
         self.reverse_kl_coef = reverse_kl_coef
         self.ce_coef = ce_coef
         self.weighted_entropy_coef = weighted_entropy_coef
@@ -668,12 +680,10 @@ class PPOLoss(nn.Module):
             value_loss = torch.tensor(0.0, device=logits.device)
 
         # Convergence/Divergence Losses
-        convergence_loss = (
-            -new_logprobs.mul(model_ids == self.model_id).mul(weights).sum()
-        )
-        divergence_loss = (
-            new_logprobs.mul(model_ids != self.model_id).mul(weights).sum()
-        )
+        self_mask = model_ids == self.model_id
+        peer_mask = model_ids != self.model_id
+        convergence_loss = -new_logprobs.mul(self_mask).mul(weights).sum()
+        divergence_loss = new_logprobs.mul(peer_mask).mul(weights).sum()
 
         # Exploration bonus
         exploration_bonus = -new_logprobs.mul(weights).sum()
@@ -695,6 +705,23 @@ class PPOLoss(nn.Module):
 
         weighted_kl_divergence = kl_divergence.mul(-advantages).sum()  # Scalar
         kl_divergence = kl_divergence.sum()  # Scalar
+
+        sample_kl_div = torch.nn.functional.kl_div(
+            new_logprobs,
+            logprobs,
+            reduction="none",
+            log_target=True,
+        ).mul(weights)
+
+        if self_mask.sum() > 0:
+            self_kl_divergence = sample_kl_div[self_mask].sum()
+        else:
+            self_kl_divergence = torch.tensor(0.0, device=logits.device)
+
+        if peer_mask.sum() > 0:
+            peer_kl_divergence = sample_kl_div[peer_mask].sum()
+        else:
+            peer_kl_divergence = torch.tensor(0.0, device=logits.device)
 
         # Calculate reverse KL divergence between the old and new policies
         reverse_kl_divergence = torch.nn.functional.kl_div(
@@ -760,6 +787,8 @@ class PPOLoss(nn.Module):
             entropy_weight=self.entropy_coef * num_tokens,
             entropy_target_weight=self.entropy_target_coef * num_tokens,
             kl_weight=self.kl_coef * num_tokens,
+            self_kl_weight=self.self_kl_coef * num_tokens,
+            peer_kl_weight=self.peer_kl_coef * num_tokens,
             reverse_kl_weight=self.reverse_kl_coef * num_tokens,
             ce_weight=self.ce_coef * num_tokens,
             weighted_entropy_weight=self.weighted_entropy_coef * num_tokens,
@@ -779,6 +808,8 @@ class PPOLoss(nn.Module):
             entropy_bonus=entropy_bonus,
             entropy_target=self.entropy_target * num_tokens,
             kl_divergence=kl_divergence,
+            self_kl_divergence=self_kl_divergence,
+            peer_kl_divergence=peer_kl_divergence,
             reverse_kl_divergence=reverse_kl_divergence,
             ce_loss=ce_loss,
             weighted_entropy_bonus=weighted_entropy_bonus,

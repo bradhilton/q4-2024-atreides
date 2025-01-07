@@ -212,11 +212,14 @@ class Trainer:
         self.base_model = base_model
         self.output_dir = os.path.abspath(output_dir)
         os.makedirs(self.output_dir, exist_ok=True)
-        self.models = [base_model] * torch.cuda.device_count() + [
-            os.path.join(self.output_dir, subdir)
-            for subdir in os.listdir(self.output_dir)
-            if os.path.isdir(os.path.join(self.output_dir, subdir)) and subdir.isdigit()
-        ]
+        self.models = [base_model] * torch.cuda.device_count() + sorted(
+            [
+                os.path.join(self.output_dir, subdir)
+                for subdir in os.listdir(self.output_dir)
+                if os.path.isdir(os.path.join(self.output_dir, subdir))
+                and subdir.isdigit()
+            ]
+        )
         if self.latest_models != {base_model}:
             print(f"Resuming from {self.latest_models}")
         self.base_model_checkpoint_files = base_model_checkpoint_files
