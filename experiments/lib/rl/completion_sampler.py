@@ -298,6 +298,7 @@ class CompletionSampler:
                 "skip_special_tokens": "guided_regex" in kwargs.get("extra_body", {}),
             },
         }
+
         if continue_last_message_if_assistant and messages[-1]["role"] == "assistant":
             prefix = messages[-1].get("content") or ""
             if not isinstance(prefix, str):
@@ -316,6 +317,10 @@ class CompletionSampler:
             prefix = ""
         if not "model" in untyped_kwargs:
             untyped_kwargs["model"] = await self.get_model()
+        if "tags" in untyped_kwargs:
+            untyped_kwargs["tags"] = untyped_kwargs["tags"] + [
+                untyped_kwargs["model"].split("rl")[-1]
+            ]
         prompt_tokens = parent.all_token_count(tokenizer, cache=True)
         estimated_completion_tokens = (
             parent.estimated_completion_tokens()
