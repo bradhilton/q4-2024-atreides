@@ -8,7 +8,7 @@ import json
 import nest_asyncio
 from omegaconf import OmegaConf
 import os
-from pydantic import BaseModel, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
 import random
 import re
 import shutil
@@ -67,6 +67,7 @@ class EvalResult(BaseModel):
     entropy: float
     tokens: int
     exceptions: list[BaseException]
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @property
     def wandb_data(self) -> dict[str, Any]:
@@ -77,14 +78,14 @@ class EvalResult(BaseModel):
             f"{self.name}/tokens": self.tokens,
         }
 
-    @field_serializer("exceptions")
-    def serialize_exceptions(self, exceptions: list[BaseException]) -> list[str]:
-        return [str(e) for e in exceptions]
-
-    @field_validator("exceptions")
+    @field_validator("exceptions", mode="before")
     @classmethod
     def validate_exceptions(cls, exceptions: list[str]) -> list[BaseException]:
         return [Exception(e) for e in exceptions]
+
+    @field_serializer("exceptions")
+    def serialize_exceptions(self, exceptions: list[BaseException]) -> list[str]:
+        return [str(e) for e in exceptions]
 
 
 class ExploreImpl(Protocol):
@@ -251,7 +252,9 @@ class Trainer:
         eval_results_path = os.path.join(self.output_dir, "eval-results.json")
         if os.path.exists(eval_results_path):
             with open(eval_results_path) as f:
-                self.eval_results = {k: [EvalResult(**r) for r in v] for k, v in json.load(f).items()}
+                self.eval_results = {
+                    k: [EvalResult(**r) for r in v] for k, v in json.load(f).items()
+                }
         else:
             self.eval_results: dict[str, list[EvalResult]] = {}
         self.eval_episodes = {eval.name: eval.episodes for eval in self.evals.values()}
