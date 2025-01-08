@@ -230,11 +230,12 @@ class Trainer:
             ]
         )
         if not self.models:
-            checkpoint_dir = asyncio.run(self._get_checkpoint_dir(self.base_model))
-            self.models = [
-                self._create_iteration_dir(checkpoint_dir, copy_model_files=True)[1]
-                for _ in range(torch.cuda.device_count())
-            ]
+            # checkpoint_dir = asyncio.run(self._get_checkpoint_dir(self.base_model))
+            # self.models = [
+            #     self._create_iteration_dir(checkpoint_dir, copy_model_files=True)[1]
+            #     for _ in range(torch.cuda.device_count())
+            # ]
+            self.models = [self.base_model for _ in range(torch.cuda.device_count())]
         print(f"Resuming from {self.latest_models}")
         self.base_model_checkpoint_files = base_model_checkpoint_files
         self.explore_options = explore_options
