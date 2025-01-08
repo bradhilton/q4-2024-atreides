@@ -12,5 +12,5 @@ experiments/logs
 experiments/models
 experiments/runs
 experiments/wandb
-experiments/02-llama3.py
+experiments/002-llama3.py
 wandb
