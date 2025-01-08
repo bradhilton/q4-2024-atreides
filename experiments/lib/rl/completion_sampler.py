@@ -319,7 +319,7 @@ class CompletionSampler:
             untyped_kwargs["model"] = await self.get_model()
         if "tags" in untyped_kwargs:
             untyped_kwargs["tags"] = untyped_kwargs["tags"] + [
-                untyped_kwargs["model"].split("rl")[-1]
+                untyped_kwargs["model"].split("rl")[-1].split("/")[-1]
             ]
         prompt_tokens = parent.all_token_count(tokenizer, cache=True)
         estimated_completion_tokens = (
