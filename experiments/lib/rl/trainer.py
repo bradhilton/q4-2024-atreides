@@ -280,7 +280,10 @@ class Trainer:
         if self._wandb_kwargs:
             self._wandb_kwargs["resume"] = "allow"
         self._wandb_run = (
-            wandb.run or wandb.init(**self._wandb_kwargs)
+            wandb.run
+            or wandb.init(
+                **self._wandb_kwargs, settings=wandb.Settings(start_method="fork")
+            )
             if self._wandb_kwargs
             else None
         )
