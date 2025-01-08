@@ -60,6 +60,7 @@ class Eval:
 @dataclass
 class EvalResult:
     name: str
+    model: str
     avg: float
     max: float
     entropy: float
@@ -253,7 +254,6 @@ class Trainer:
         self._vllm_task: Optional[asyncio.Task[list[vLLM]]] = None
         self._completion_sampler_pool: Optional[CompletionSamplerPool] = None
         self.tokenizer = Tokenizer(base_model)
-        self._substitute_episodes: dict[Episode, Episode] = {}
         try:
             get_ipython  # type: ignore
             self.tqdm = tqdm_notebook
@@ -325,6 +325,7 @@ class Trainer:
         )
         combined_result = EvalResult(
             name=eval_name,
+            model=",".join(result.model for result in results),
             avg=sum(result.avg for result in results) / len(results),
             max=sum(result.max for result in results) / len(results),
             entropy=sum(result.entropy for result in results) / len(results),
@@ -496,6 +497,7 @@ class Trainer:
         avg_score = get_avg_score()
         return EvalResult(
             name=f"{eval_name}/{id}",
+            model=model,
             avg=avg_score,
             max=get_max_score(),
             entropy=get_entropy(),
