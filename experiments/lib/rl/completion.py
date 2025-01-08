@@ -28,6 +28,7 @@ from pydantic import (
 )
 import torch
 from typing import (
+    Any,
     Iterable,
     Literal,
     Optional,
@@ -627,6 +628,21 @@ class Completion:
 
     def root(self) -> "Completion":
         return self.parent.root() if self.parent else self
+
+    def to_dict(self, models: Optional[set[str]] = None) -> dict[str, Any]:
+        return {
+            "messages": [
+                message if isinstance(message, dict) else message.model_dump()
+                for message in self.messages
+            ],
+            "reward": self.reward,
+            "model": self.model,
+            "children": [
+                child.to_dict(models=models)
+                for child in self.children
+                if child.matches_models(models)
+            ],
+        }
 
     def token_advantage(self, cache: bool, models: Optional[set[str]]) -> float:
         return self.advantage(cache=cache, models=models) / (

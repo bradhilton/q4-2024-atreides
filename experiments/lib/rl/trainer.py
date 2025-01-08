@@ -4,9 +4,11 @@ from aioitertools.helpers import maybe_await
 import asyncio
 from dataclasses import dataclass
 import glob
-from omegaconf import OmegaConf
+import json
 import nest_asyncio
+from omegaconf import OmegaConf
 import os
+from pydantic import BaseModel, field_serializer, field_validator
 import random
 import re
 import shutil
@@ -57,8 +59,7 @@ class Eval:
     sampling_kwargs: Optional[SamplingKwargs] = None
 
 
-@dataclass
-class EvalResult:
+class EvalResult(BaseModel):
     name: str
     model: str
     avg: float
@@ -75,6 +76,15 @@ class EvalResult:
             f"{self.name}/entropy": self.entropy,
             f"{self.name}/tokens": self.tokens,
         }
+
+    @field_serializer("exceptions")
+    def serialize_exceptions(self, exceptions: list[BaseException]) -> list[str]:
+        return [str(e) for e in exceptions]
+
+    @field_validator("exceptions")
+    @classmethod
+    def validate_exceptions(cls, exceptions: list[str]) -> list[BaseException]:
+        return [Exception(e) for e in exceptions]
 
 
 class ExploreImpl(Protocol):
@@ -238,9 +248,13 @@ class Trainer:
             32768 // tune_sequence_length, 1
         )
         self.evals = {eval.name: eval for eval in evals or []}
-        self.eval_results: dict[str, list[EvalResult]] = {}
+        eval_results_path = os.path.join(self.output_dir, "eval-results.json")
+        if os.path.exists(eval_results_path):
+            with open(eval_results_path) as f:
+                self.eval_results = {k: [EvalResult(**r) for r in v] for k, v in json.load(f).items()}
+        else:
+            self.eval_results: dict[str, list[EvalResult]] = {}
         self.eval_episodes = {eval.name: eval.episodes for eval in self.evals.values()}
-        self.eval_exceptions = {eval.name: [] for eval in self.evals.values()}
         self.explore_results: list[ExploreResult] = []
         self.torchrun_kwargs = torchrun_kwargs or {}
         self.tune_episode_sample_fraction = tune_episode_sample_fraction
@@ -344,6 +358,11 @@ class Trainer:
                     for result in results
                     for key, value in result.wandb_data.items()
                 }
+            )
+        with open(f"{self.output_dir}/eval-results.json", "w") as f:
+            json.dump(
+                {k: [r.model_dump() for r in v] for k, v in self.eval_results.items()},
+                f,
             )
         return combined_result
 
@@ -605,6 +624,8 @@ class Trainer:
                     raise exception
         explore_task.cancel()
         self.explore_results.append(result)
+        with open(f"{self.output_dir}/explore-results.jsonl", "a") as f:
+            f.write(json.dumps(result.to_dict()) + "\n")
         return result.completed()
 
     async def tune(self, result: ExploreResult, *, verbosity: Verbosity = 2) -> None:

@@ -7,7 +7,7 @@ import shutil
 import time
 import torch
 from tqdm import tqdm
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from .completion import Completion
 from .episode import Episode
@@ -85,6 +85,15 @@ class ExploreResult:
         mask = tensors["ids"] == id(completion)
         repeat_counts = mask.sum() // completion.reference_logprobs.size(0)
         tensors["reference_logprobs"][mask] = completion.reference_logprobs.repeat(repeat_counts)  # type: ignore
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "episode_completions": [
+                episode.completion.to_dict(models=self.models)
+                for episode in self.episodes
+            ],
+            "exceptions": [str(e) for e in self.exceptions],
+        }
 
     def _get_avg_max_score(self) -> float:
         if not self.episodes:
