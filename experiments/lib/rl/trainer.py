@@ -153,6 +153,7 @@ class ExploreOptions:
     num_parents: int
     branch_factor: int
     advantage_max_weight: float = 0.0
+    advantage_power: float = 1.0
     max_split_points: Optional[int] = None
     normalize_values: bool = True
     normalize_advantages: bool = True
@@ -555,6 +556,7 @@ class Trainer:
             models=set(self.latest_models),
             abs_weighted_sum=200_000.0,
             advantage_max_weight=self.explore_options.advantage_max_weight,
+            advantage_power=self.explore_options.advantage_power,
             sample_probability_power=self.explore_options.get_sample_probability_power(),
             sequence_length=self.tune_sequence_length,
             tensor_dir=self.output_dir + "/tensors",

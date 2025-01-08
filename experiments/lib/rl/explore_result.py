@@ -23,6 +23,7 @@ class ExploreResult:
     models: set[str]
     abs_weighted_sum: float
     advantage_max_weight: float
+    advantage_power: float
     sample_probability_power: float
     sequence_length: int
     tensor_dir: str
@@ -54,6 +55,7 @@ class ExploreResult:
             self._write_weights(packed_tensors)
             if self.normalize_values:
                 self._normalize(packed_tensors, "values")
+            packed_tensors["advantages"] **= self.advantage_power
             if self.normalize_advantages:
                 self._normalize(packed_tensors, "advantages")
             # Not sure why this is necessary
