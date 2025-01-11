@@ -118,7 +118,6 @@ class PPOResult:
     value_weight: torch.Tensor = tensor_field()
     convergence_weight: torch.Tensor = tensor_field()
     divergence_weight: torch.Tensor = tensor_field()
-    exploration_weight: torch.Tensor = tensor_field()
     entropy_weight: torch.Tensor = tensor_field()
     entropy_target_weight: torch.Tensor = tensor_field()
     kl_weight: torch.Tensor = tensor_field()
@@ -139,7 +138,6 @@ class PPOResult:
     value_loss: torch.Tensor = tensor_field()
     convergence_loss: torch.Tensor = tensor_field()
     divergence_loss: torch.Tensor = tensor_field()
-    exploration_bonus: torch.Tensor = tensor_field()
     entropy_bonus: torch.Tensor = tensor_field()
     entropy_target: torch.Tensor = tensor_field()
     kl_divergence: torch.Tensor = tensor_field()
@@ -193,7 +191,6 @@ class PPOResult:
             + (self.value_weight / self.num_tokens) * self.value_loss
             + (self.convergence_weight / self.num_tokens) * self.convergence_loss
             - (self.divergence_weight / self.num_tokens) * self.divergence_loss
-            - (self.exploration_weight / self.num_tokens) * self.exploration_bonus
             - (self.entropy_weight / self.num_tokens) * self.entropy_bonus
             + (self.entropy_target_weight / self.num_tokens) * self.entropy_target_loss
             + (self.kl_weight / self.num_tokens) * self.kl_divergence
@@ -240,7 +237,6 @@ class PPOLoss(nn.Module):
         model_id: int = 0,
         convergence_coef: float = 0.0,
         divergence_coef: float = 0.0,
-        exploration_coef: float = 0.0,
         entropy_coef: float = 0.01,
         entropy_target: float = 0.5,
         entropy_target_coef: float = 0.0,
@@ -292,7 +288,6 @@ class PPOLoss(nn.Module):
             model_id (int): The ID of the model to use for convergence/divergence losses. Defaults to 0.
             convergence_coef (float): Coefficient for the convergence loss. Defaults to 0.0.
             divergence_coef (float): Coefficient for the divergence loss. Defaults to 0.0.
-            exploration_coef (float): Coefficient for the exploration bonus to encourage exploration. Defaults to 0.0.
             entropy_coef (float): Coefficient for the entropy bonus to encourage exploration.
             entropy_target (float): Target entropy (defaults to 0.5).
             entropy_target_coef (float): Coefficient for the entropy target loss.
@@ -338,7 +333,6 @@ class PPOLoss(nn.Module):
         self.model_id = model_id
         self.convergence_coef = convergence_coef
         self.divergence_coef = divergence_coef
-        self.exploration_coef = exploration_coef
         self.entropy_coef = entropy_coef
         self.entropy_target = entropy_target
         self.entropy_target_coef = entropy_target_coef
@@ -685,9 +679,6 @@ class PPOLoss(nn.Module):
         convergence_loss = -new_logprobs.mul(self_mask).mul(weights).sum()
         divergence_loss = new_logprobs.mul(peer_mask).mul(weights).sum()
 
-        # Exploration bonus
-        exploration_bonus = -new_logprobs.mul(weights).sum()
-
         # Entropy bonus
         entropy_bonus = entropy.mul(weights)
         weighted_entropy_bonus = entropy_bonus.mul(-advantages).sum()  # Scalar
@@ -783,7 +774,6 @@ class PPOLoss(nn.Module):
             value_weight=self.value_coef * num_tokens,
             convergence_weight=self.convergence_coef * num_tokens,
             divergence_weight=self.divergence_coef * num_tokens,
-            exploration_weight=self.exploration_coef * num_tokens,
             entropy_weight=self.entropy_coef * num_tokens,
             entropy_target_weight=self.entropy_target_coef * num_tokens,
             kl_weight=self.kl_coef * num_tokens,
@@ -804,7 +794,6 @@ class PPOLoss(nn.Module):
             value_loss=value_loss,
             convergence_loss=convergence_loss,
             divergence_loss=divergence_loss,
-            exploration_bonus=exploration_bonus,
             entropy_bonus=entropy_bonus,
             entropy_target=self.entropy_target * num_tokens,
             kl_divergence=kl_divergence,
