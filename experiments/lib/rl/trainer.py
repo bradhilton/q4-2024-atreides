@@ -273,11 +273,7 @@ class Trainer:
         self._vllm_task: Optional[asyncio.Task[list[vLLM]]] = None
         self._completion_sampler_pool: Optional[CompletionSamplerPool] = None
         self.tokenizer = Tokenizer(base_model)
-        try:
-            get_ipython  # type: ignore
-            self.tqdm = tqdm_notebook
-        except NameError:
-            self.tqdm = tqdm
+        self.tqdm = tqdm_notebook if 'get_ipython' in globals() else tqdm
         self._wandb_kwargs = wandb_kwargs.copy() if wandb_kwargs else {}
         if self._wandb_kwargs:
             self._wandb_kwargs["resume"] = "allow"
