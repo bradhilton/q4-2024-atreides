@@ -23,6 +23,7 @@ dependencies = [
     "polars>=1.17.1",
     "python-constraint>=1.4.0",
     "python-dotenv>=1.0.1",
+    "seaborn>=0.13.2",
     "sympy>=1.13.1",
     "tiktoken>=0.7.0",
     "tokenizers>=0.20.0",
